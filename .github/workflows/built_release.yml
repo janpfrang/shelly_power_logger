@@ -1,12 +1,7 @@
 # ============================================================
 #  Shelly ESP32 Logger — Manual Firmware Build
 #  Triggered manually from the GitHub Actions tab.
-<<<<<<< add_Histogram
 #  Produces a .bin ready to flash to the ESP32.
-=======
-#  Produces a .bin ready to flash to the ESP32 - no unit testing - 
-#  For unit testing use "built_firmwary.yml"
->>>>>>> main
 #
 #  How to use:
 #    1. Go to your repo on GitHub
@@ -98,7 +93,6 @@ jobs:
             firmware_output/*.bin
             firmware_output/*.elf
           retention-days: 90    # keep manual builds longer than CI builds
-<<<<<<< add_Histogram
 
       # ── Flash instructions printed in the log for convenience ─────────────
       # The artifact contains three .bin files. Flash ALL THREE together:
@@ -122,5 +116,3 @@ jobs:
           echo "    0x8000  Shelly_ESP32_Logger.ino.partitions.bin \\"
           echo "    0x10000 Shelly_ESP32_Logger.ino.bin"
           echo "================================================"
-=======
->>>>>>> main
