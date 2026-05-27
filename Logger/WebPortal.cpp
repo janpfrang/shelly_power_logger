@@ -82,6 +82,7 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
 <div class="card">
   <div class="btn-row">
     <button onclick="location.href='/liveplot'" style="background: #28a745;">📈 Live Plot</button>
+    <button onclick="location.href='/histogram'" style="background: #17a2b8;">📊 Histogram</button>
     <button onclick="location.href='/download'">Download Log Files</button>
     <button class="danger" onclick="confirmReset()">Reset &amp; Delete SD</button>
     <button class="muted" onclick="location.href='/settings'">Settings</button>
@@ -557,6 +558,205 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
 )HTML";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PAGE_HISTOGRAM  — live power distribution since page load
+// ─────────────────────────────────────────────────────────────────────────────
+static const char PAGE_HISTOGRAM[] PROGMEM = R"HTML(
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Power Histogram – Shelly Logger</title>
+<style>
+  body { font-family: sans-serif; max-width: 650px; margin: 1em auto;
+         padding: 1em; background: #f5f5f5; color: #222; }
+  h1   { color: #000; margin-bottom: 0.4em; }
+  .card { background: white; border-radius: 8px; padding: 1.2em;
+          margin-bottom: 1em; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  .meta { display: flex; justify-content: space-between; font-size: 0.9em;
+          color: #555; margin-bottom: 1em; flex-wrap: wrap; gap: 0.4em; }
+  .meta span strong { color: #007acc; }
+  canvas { width: 100%; display: block; background: #111116;
+           border-radius: 6px; box-shadow: inset 0 0 8px rgba(0,0,0,0.4); }
+  .legend { font-size: 0.82em; color: #666; margin-top: 0.5em; text-align: center; }
+  .btn-row { display: flex; gap: 0.6em; margin-top: 0.8em; }
+  button { padding: 0.7em 1.2em; font-size: 0.95em; border: none;
+           border-radius: 6px; background: #007acc; color: white; cursor: pointer; }
+  button:hover { background: #005f99; }
+  button.danger { background: #d33; }
+  button.danger:hover { background: #a22; }
+  a.back { display: inline-block; margin-top: 0.5em; color: #007acc;
+           text-decoration: none; font-weight: bold; }
+  a.back:hover { text-decoration: underline; }
+</style>
+</head><body>
+
+<h1>Power Distribution</h1>
+
+<div class="card">
+  <div class="meta">
+    <span>Samples: <strong id="n-samples">0</strong></span>
+    <span>Max recorded: <strong id="max-w">— W</strong></span>
+    <span>Current: <strong id="cur-w">— W</strong></span>
+    <span>Bin width: <strong id="bin-w">—</strong></span>
+  </div>
+
+  <canvas id="histCanvas" width="600" height="300"></canvas>
+  <div class="legend">20 equal bins — upper edge = max recorded power since page load</div>
+
+  <div class="btn-row">
+    <button onclick="resetData()">Reset</button>
+  </div>
+</div>
+
+<a class="back" href="/">← Back</a>
+
+<script>
+const BINS      = 20;
+const BAR_COLOR = '#007acc';
+const BAR_HOVER = '#28a745';
+
+// All raw samples collected since page load (or last reset)
+let samples  = [];
+let maxPower = 0;          // running maximum
+let pollMs   = 1000;       // synced from /api/settings on startup
+
+const canvas = document.getElementById('histCanvas');
+const ctx    = canvas.getContext('2d');
+
+// ── Fetch current poll interval so we match the device cadence ───────────────
+async function init() {
+  try {
+    const r = await fetch('/api/settings');
+    const d = await r.json();
+    if (d.poll_ms) pollMs = Math.max(d.poll_ms, 1000);
+  } catch(e) { /* keep default */ }
+  setInterval(tick, pollMs);
+  tick();
+}
+
+// ── Called every poll interval ────────────────────────────────────────────────
+async function tick() {
+  try {
+    const r = await fetch('/api/live');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.power === null) return;
+
+    const p = d.power;
+    samples.push(p);
+    if (p > maxPower) maxPower = p;
+
+    document.getElementById('n-samples').textContent = samples.length;
+    document.getElementById('max-w').textContent     = maxPower.toFixed(1) + ' W';
+    document.getElementById('cur-w').textContent     = p.toFixed(1) + ' W';
+
+    draw();
+  } catch(e) { /* network hiccup — skip tick */ }
+}
+
+// ── Build bins and draw ───────────────────────────────────────────────────────
+function buildBins() {
+  // Guard: if max is 0 (all readings are 0) use 1 W as a floor so bins exist
+  const upper = maxPower > 0 ? maxPower : 1;
+  const width = upper / BINS;
+
+  document.getElementById('bin-w').textContent = width.toFixed(1) + ' W';
+
+  const counts = new Array(BINS).fill(0);
+  for (const s of samples) {
+    // Clamp to last bin for values exactly equal to maxPower
+    let idx = Math.min(Math.floor(s / width), BINS - 1);
+    counts[idx]++;
+  }
+  return { counts, width, upper };
+}
+
+function draw() {
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if (samples.length === 0) return;
+
+  const { counts, width, upper } = buildBins();
+  const maxCount = Math.max(...counts, 1);
+
+  // ── Layout constants ──────────────────────────────────────────────────────
+  const pL = 52, pR = 12, pT = 16, pB = 38;
+  const gW = W - pL - pR;
+  const gH = H - pT - pB;
+
+  // ── Y-axis gridlines and labels ───────────────────────────────────────────
+  ctx.font      = '11px monospace';
+  ctx.fillStyle = '#8e8e93';
+  ctx.strokeStyle = '#1e1e26';
+  ctx.lineWidth   = 0.8;
+  const Y_DIVS = 4;
+  ctx.textAlign    = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= Y_DIVS; i++) {
+    const pct  = i / Y_DIVS;
+    const yPos = pT + gH * pct;
+    const val  = Math.round(maxCount * (1 - pct));
+    ctx.fillText(val, pL - 6, yPos);
+    if (i > 0 && i < Y_DIVS) {
+      ctx.beginPath();
+      ctx.moveTo(pL, yPos);
+      ctx.lineTo(W - pR, yPos);
+      ctx.stroke();
+    }
+  }
+
+  // ── Bars ──────────────────────────────────────────────────────────────────
+  const barSlot = gW / BINS;
+  const barGap  = Math.max(1, barSlot * 0.08);
+  const barW    = barSlot - barGap;
+
+  for (let i = 0; i < BINS; i++) {
+    const barH  = (counts[i] / maxCount) * gH;
+    const x     = pL + i * barSlot + barGap / 2;
+    const y     = pT + gH - barH;
+
+    // Highlight the bin containing the most recent reading
+    const latest = samples[samples.length - 1];
+    const latestBin = Math.min(Math.floor(latest / (upper / BINS)), BINS - 1);
+    ctx.fillStyle = (i === latestBin) ? BAR_HOVER : BAR_COLOR;
+
+    ctx.beginPath();
+    ctx.roundRect(x, y, barW, Math.max(barH, 1), 2);
+    ctx.fill();
+  }
+
+  // ── X-axis labels (every 5th bin) ─────────────────────────────────────────
+  ctx.fillStyle    = '#8e8e93';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'top';
+  for (let i = 0; i <= BINS; i += 5) {
+    const xPos  = pL + (i / BINS) * gW;
+    const label = (i * upper / BINS).toFixed(0) + 'W';
+    ctx.fillText(label, xPos, pT + gH + 6);
+  }
+
+  // ── Axes outline ──────────────────────────────────────────────────────────
+  ctx.strokeStyle = '#44444f';
+  ctx.lineWidth   = 1;
+  ctx.strokeRect(pL, pT, gW, gH);
+}
+
+function resetData() {
+  samples  = [];
+  maxPower = 0;
+  document.getElementById('n-samples').textContent = '0';
+  document.getElementById('max-w').textContent     = '— W';
+  document.getElementById('cur-w').textContent     = '— W';
+  document.getElementById('bin-w').textContent     = '—';
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+init();
+</script>
+</body></html>
+)HTML";
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -609,6 +809,7 @@ bool WebPortal::begin() {
   _server.on("/reset",               HTTP_POST, [this](){ handleReset(); });
   _server.on("/settings",            HTTP_GET,  [this](){ handleSettings(); });
   _server.on("/readme",              HTTP_GET,  [this](){ handleReadme(); });
+  _server.on("/histogram",            HTTP_GET,  [this](){ handleHistogram(); });
   _server.on("/liveplot",            HTTP_GET,  [this](){ handleLivePlot(); });
   _server.onNotFound(                          [this](){ handleNotFound(); });
 
@@ -704,6 +905,10 @@ void WebPortal::handleReset() {
 
 void WebPortal::handleSettings() {
   _server.send_P(200, "text/html", PAGE_SETTINGS);
+}
+
+void WebPortal::handleHistogram() {
+  _server.send_P(200, "text/html", PAGE_HISTOGRAM);
 }
 
 void WebPortal::handleLivePlot() {
