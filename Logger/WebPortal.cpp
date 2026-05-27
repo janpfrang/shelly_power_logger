@@ -423,42 +423,136 @@ static const char PAGE_README[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><title>Read Me – Shelly Logger</title>
 <style>
-  body { font-family: sans-serif; max-width: 600px; margin: 2em auto;
-         padding: 1em; line-height: 1.5; }
-  a { color: #007acc; }
-  code { background: #f0f0f0; padding: .1em .4em; border-radius: 3px; }
+  body { font-family: sans-serif; max-width: 640px; margin: 2em auto;
+         padding: 1em; line-height: 1.6; color: #222; }
+  h1 { font-size: 1.4em; margin-bottom: 0.2em; }
+  h2 { font-size: 1.05em; margin: 1.4em 0 0.4em; border-bottom: 1px solid #ddd;
+       padding-bottom: 0.2em; color: #333; }
+  a  { color: #007acc; }
+  code { background: #f0f0f0; padding: .1em .4em; border-radius: 3px;
+         font-size: 0.92em; }
+  ul, ol { margin: 0.4em 0 0.8em; padding-left: 1.4em; }
+  li { margin-bottom: 0.3em; }
+  table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.93em; }
+  th { background: #f0f0f0; text-align: left; padding: 0.4em 0.6em;
+       border: 1px solid #ccc; }
+  td { padding: 0.35em 0.6em; border: 1px solid #ddd; vertical-align: top; }
+  .note { background: #fffbe6; border-left: 3px solid #f0c040;
+          padding: 0.5em 0.8em; border-radius: 3px; font-size: 0.9em;
+          margin: 0.8em 0; }
 </style></head><body>
-<h1>BBRAUN Shelly Power Logger V1</h1>
 
-<p><strong>Hardware:</strong></p>
+<h1>BRAUN Shelly Power Logger V1</h1>
+<p>Portable power logger for 230 V appliances. The Shelly Plug S measures
+voltage, current and active power; the ESP32 records and serves the data.</p>
+
+<h2>Hardware</h2>
 <ul>
-  <li>Shelly Plug S MTR Gen3 (CE-marked, 16 A) — measures voltage, power, current</li>
-  <li>ESP32-WROOM-32 — logger, web server, SD writer</li>
-  <li>MicroSD card — permanent log storage</li>
-  <li>Certified 230 V → 5 V DC PSU — powers ESP32 only</li>
+  <li><strong>Shelly Plug S MTR Gen3</strong> — CE-marked, max 16 A / 3680 W.
+      Measures voltage, current, active power. Pushes data to the ESP32 every 1 s.</li>
+  <li><strong>ESP32-WROOM-32</strong> — runs the web server, buffers samples in RAM,
+      writes to SD card.</li>
+  <li><strong>MicroSD card</strong> — permanent CSV log storage.</li>
+  <li><strong>230 V → 5 V PSU</strong> — powers the ESP32 only. Must be a certified
+      mains-rated supply.</li>
 </ul>
 
-<p><strong>Functions:</strong></p>
-<ul>
-  <li>Logs: <code>time_ms, voltage_V, power_W, pf_apparent</code></li>
-  <li>pf_apparent = active power / (V × I) — derived value, accurate for resistive loads</li>
-  <li>Adjustable poll/sampling frequency: 1, 2, 5, 10, 30 s</li>
-  <li>Adjustable power threshold for start of log</li>
-  <li>Default: polls every 1 s, writes to SD every 10 s</li>
-  <li>Live data via Wi-Fi (ESP32 access point: <code>PZEM_Logger</code>)</li>
-</ul>
-
-<p><strong>First-time setup:</strong></p>
+<h2>Connecting to the logger</h2>
 <ol>
-  <li>Power on the ESP32 logger — AP <code>PZEM_Logger</code> / <code>logger1234</code> appears</li>
-  <li>Power on the Shelly — it should already be provisioned to join <code>PZEM_Logger</code></li>
-  <li>Connect your phone to <code>PZEM_Logger</code></li>
-  <li>Browse to <a href="http://braun_PZEM.local">http://braun_PZEM.local</a>
-      or <a href="http://192.168.4.1">http://192.168.4.1</a></li>
+  <li>Power on the ESP32 — Wi-Fi access point
+      <code>PZEM_Logger</code> / password <code>logger1234</code> appears within ~3 s.</li>
+  <li>Power on the Shelly Plug S — it automatically joins <code>PZEM_Logger</code>
+      and starts pushing measurements.</li>
+  <li>Connect your phone or laptop to <code>PZEM_Logger</code>.</li>
+  <li>Open a browser and go to
+      <a href="http://192.168.4.1">http://192.168.4.1</a>
+      &nbsp;or&nbsp;
+      <a href="http://braun_PZEM.local">http://braun_PZEM.local</a>
+      (mDNS — works on iOS, macOS, most Android).</li>
 </ol>
 
-<p><strong>Contact:</strong> jan.pfrang@delonghigroup.com</p>
+<div class="note">
+  <strong>Shelly web interface:</strong> while connected to <code>PZEM_Logger</code>
+  the Shelly itself is reachable at <code>http://192.168.4.2</code>
+  (or whichever IP the ESP32 DHCP server assigned — check the status badge on the
+  home screen if unsure). Use this to update Shelly firmware or change its script.
+</div>
+
+<h2>Web interface — page by page</h2>
+
+<table>
+  <tr><th>Page</th><th>What it does</th></tr>
+  <tr>
+    <td><strong>Home</strong><br><code>/</code></td>
+    <td>Shows live voltage, power and pf<sub>apparent</sub> updated every second.
+        Status badges show whether the Shelly is pushing data (green = OK,
+        red = no push received in the last 3 s) and whether the SD card is
+        working. Also shows RAM buffer fill, dropped sample count, and uptime.</td>
+  </tr>
+  <tr>
+    <td><strong>Live Plot</strong><br><code>/liveplot</code></td>
+    <td>Oscilloscope-style scrolling power chart covering the last 60 samples.
+        Y-axis scales automatically to the peak value seen. Useful for watching
+        switch-on transients or duty cycles in real time.</td>
+  </tr>
+  <tr>
+    <td><strong>Download Log</strong><br><code>/download</code></td>
+    <td>Flushes the RAM buffer to SD, then streams <code>log.csv</code> directly
+        to your browser as a file download. CSV columns:
+        <code>time_ms, voltage_V, power_W, pf_apparent</code>.</td>
+  </tr>
+  <tr>
+    <td><strong>Reset &amp; Delete SD</strong><br><code>POST /reset</code></td>
+    <td>Deletes <code>log.csv</code> and creates a fresh file with only the header
+        row. RAM buffer is also cleared. Asks for confirmation before proceeding.</td>
+  </tr>
+  <tr>
+    <td><strong>Settings</strong><br><code>/settings</code></td>
+    <td>
+      <em>Sampling rate</em> — how often a measurement is taken from the Shelly
+      and stored in the buffer: 1 s, 2 s, 5 s, 10 s, or 30 s.<br>
+      <em>Power threshold</em> — only log a sample if active power ≥ this value.
+      Set to 0 W to log everything including standby. Useful to avoid filling
+      the SD card with idle readings.<br>
+      Changes take effect immediately but are lost on reboot.
+    </td>
+  </tr>
+</table>
+
+<h2>Log file format</h2>
+<p>CSV file at <code>/log.csv</code> on the SD card. One row per logged sample.</p>
+<table>
+  <tr><th>Column</th><th>Unit</th><th>Description</th></tr>
+  <tr><td><code>time_ms</code></td><td>ms</td>
+      <td>ESP32 uptime at time of sample (not wall-clock time)</td></tr>
+  <tr><td><code>voltage_V</code></td><td>V RMS</td>
+      <td>Mains voltage measured by Shelly</td></tr>
+  <tr><td><code>power_W</code></td><td>W</td>
+      <td>Active power (apower) measured by Shelly</td></tr>
+  <tr><td><code>pf_apparent</code></td><td>—</td>
+      <td>Derived: power_W / (voltage_V × current_A). Range 0–1.
+          Close to 1 for resistive loads (heater, kettle),
+          lower for motors or switching supplies.</td></tr>
+</table>
+
+<h2>Default settings</h2>
+<ul>
+  <li>Sampling rate: 1 s</li>
+  <li>SD flush interval: every 10 s</li>
+  <li>Power threshold: 0 W (log everything)</li>
+  <li>RAM buffer: 64 samples (~64 s reserve if SD is temporarily unavailable)</li>
+</ul>
+
+<h2>LED status</h2>
+<ul>
+  <li><strong>1 Hz blink</strong> — system healthy (Shelly pushing, SD OK)</li>
+  <li><strong>5 Hz blink</strong> — error (Shelly silent for &gt;3 s, or SD fault)</li>
+</ul>
+
+<p style="margin-top:1.5em"><strong>Contact:</strong>
+<a href="mailto:jan.pfrang@delonghigroup.com">jan.pfrang@delonghigroup.com</a></p>
 <p><a href="/">← Back</a></p>
+
 </body></html>
 )HTML";
 
