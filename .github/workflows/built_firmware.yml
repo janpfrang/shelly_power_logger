@@ -1,1 +1,146 @@
+# ============================================================
+#  Shelly ESP32 Logger — CI Pipeline
+#  Triggers: push or PR that touches Logger/** or this file
+# ============================================================
+name: Build Firmware
 
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "Logger/**"
+      - ".github/workflows/built_firmware.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "Logger/**"
+      - ".github/workflows/built_firmware.yml"
+
+# ── Only one run per ref at a time; cancel the older one ────
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ============================================================
+jobs:
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 1 – Compile the Arduino sketch → produce .bin
+  # ──────────────────────────────────────────────────────────
+  build:
+    name: "Compile Sketch (ESP32)"
+    runs-on: ubuntu-22.04          # pinned — never changes silently
+
+    steps:
+      # 1. Checkout full repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Install arduino-cli (pinned version)
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+            | BINDIR=/usr/local/bin sh -s 0.35.3
+
+      # 3. Add the ESP32 board package index
+      - name: Configure arduino-cli for ESP32
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+      # 4. Update index + install the ESP32 core (pinned for reproducibility)
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@2.0.17
+
+      # 5. Install required libraries from the Arduino Library Manager.
+      #
+      #    ArduinoJson (Benoit Blanchon) — used by ShellyClient.h to parse
+      #    the JSON pushed by shelly_push.js via POST /api/shelly_push.
+      #
+      #    All other dependencies (WiFi, WebServer, DNSServer, ESPmDNS, SD)
+      #    are bundled with the ESP32 Arduino core — no separate install needed.
+      #
+      #    NOTE: PZEM-004T-v30 is intentionally NOT listed here.
+      #    The sensor layer is now handled by the Shelly device over HTTP.
+      - name: Install Arduino libraries
+        run: |
+          arduino-cli lib install "ArduinoJson"
+
+      # 6. Compile
+      #    --fqbn       : fully-qualified board name for generic ESP32-WROOM
+      #    --output-dir : where the .bin / .elf / .map end up
+      #
+      #    To target a specific module variant, change --fqbn, e.g.:
+      #      esp32:esp32:esp32:FlashSize=4M,PartitionScheme=default
+      - name: Compile sketch
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir firmware_output \
+            Logger/Shelly_ESP32_Logger.ino
+
+      # 7. Upload .bin + .elf as a downloadable build artifact.
+      #    The .bin is the file you flash directly to the ESP32 via
+      #    esptool.py or the Arduino IDE "Upload using programmer" option.
+      #    Artifacts are retained for 30 days.
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          path: |
+            firmware_output/*.bin
+            firmware_output/*.elf
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 2 – Unit Tests  (placeholder — runs after build)
+  # ──────────────────────────────────────────────────────────
+  #
+  #  HOW TO IMPLEMENT LATER
+  #  ──────────────────────
+  #  Good candidates for native (host-side) unit tests:
+  #    • ShellyClient::ingest()   — JSON parsing, bounds checking, watchdog timer
+  #    • Logger::pollIfDue()      — threshold filtering, buffer overflow / FIFO drop
+  #    • StatusLed::setState()    — idempotent state transitions
+  #
+  #  Approach:
+  #    1. Extract pure logic from the .h files into thin, Arduino-free C++ classes.
+  #    2. Provide a minimal Arduino stub header (millis(), NAN, String, etc.)
+  #       so the headers compile on the host without the ESP32 SDK.
+  #    3. Write test cases in tests/ using Unity (C) or googletest (C++).
+  #    4. Build + run with CMake (see commented invocation below).
+  #
+  #  Suggested directory layout:
+  #    tests/
+  #      CMakeLists.txt
+  #      arduino_stub.h       ← minimal millis(), NAN, Serial stub
+  #      test_shelly_client.cpp
+  #      test_logger.cpp
+  # ──────────────────────────────────────────────────────────
+  unit-tests:
+    name: "Unit Tests (native)"
+    runs-on: ubuntu-22.04
+    needs: build          # only run if the sketch compiled cleanly
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake
+
+      # ── Replace this step with your real test runner once tests/ exists ──
+      - name: Run unit tests
+        run: |
+          echo "No unit tests implemented yet."
+          echo "Priority targets: ShellyClient::ingest(), Logger threshold/buffer logic."
+          # Uncomment when tests/CMakeLists.txt exists:
+          # cmake -S tests -B tests/build
+          # cmake --build tests/build
+          # ctest --test-dir tests/build --output-on-failure
