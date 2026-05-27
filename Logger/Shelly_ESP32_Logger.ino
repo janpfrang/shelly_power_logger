@@ -4,7 +4,7 @@
  *
  * Main sketch for the Shelly Plug S MTR Gen3 + ESP32 + SD power logger.
  *
- * Changes vs. PZEM_Logger.ino v4
+ * Changes vs. PZEM_Logger.ino  v4
  * --------------------------------
  *   REMOVED  #include (PZEM library)
  *   ADDED    ShellyClient shelly  (declared before logger)
