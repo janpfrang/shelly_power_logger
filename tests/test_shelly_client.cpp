@@ -9,7 +9,8 @@
 // Config.h → tests/Config.h (stub constants)
 #include "Arduino.h"
 #include "ArduinoJson.h"
-#define CONFIG_H
+#include "Config.h"   // stub version (tests/Config.h) — must come before the guard
+#define CONFIG_H      // now block the real Config.h from loading inside ShellyClient.h
 #include "../Logger/ShellyClient.h"
 
 #include <cassert>
