@@ -75,12 +75,19 @@ jobs:
       #
       #    To target a specific module variant, change --fqbn, e.g.:
       #      esp32:esp32:esp32:FlashSize=4M,PartitionScheme=default
+      # arduino-cli requires the sketch folder name to match the .ino filename.
+      # Our folder is "Logger/" but the file is "Shelly_ESP32_Logger.ino", so
+      # we copy the sketch into a correctly-named temporary folder first.
+      - name: Prepare sketch folder
+        run: |
+          cp -r Logger Shelly_ESP32_Logger
+
       - name: Compile sketch
         run: |
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
             --output-dir firmware_output \
-            Logger/Shelly_ESP32_Logger.ino
+            Shelly_ESP32_Logger
 
       # 7. Upload .bin + .elf as a downloadable build artifact.
       #    The .bin is the file you flash directly to the ESP32 via
