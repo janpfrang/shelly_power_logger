@@ -1,0 +1,105 @@
+# ============================================================
+#  Shelly ESP32 Logger — CI Pipeline
+#  Triggers: push or PR that touches Logger/** or this file
+# ============================================================
+name: Build Firmware
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "Logger/**"
+      - "tests/**"
+      - ".github/workflows/built_firmware.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "Logger/**"
+      - "tests/**"
+      - ".github/workflows/built_firmware.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ============================================================
+jobs:
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 1 – Compile the Arduino sketch → produce .bin
+  # ──────────────────────────────────────────────────────────
+  build:
+    name: "Compile Sketch (ESP32)"
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+            | BINDIR=/usr/local/bin sh -s 0.35.3
+
+      - name: Configure arduino-cli for ESP32
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@2.0.17
+
+      - name: Install Arduino libraries
+        run: |
+          arduino-cli lib install "ArduinoJson"
+
+      # arduino-cli requires the sketch folder name == .ino filename.
+      # Our folder is "Logger/" but the file is "Shelly_ESP32_Logger.ino".
+      - name: Prepare sketch folder
+        run: cp -r Logger Shelly_ESP32_Logger
+
+      - name: Compile sketch
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir firmware_output \
+            Shelly_ESP32_Logger
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          path: |
+            firmware_output/*.bin
+            firmware_output/*.elf
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 2 – Native unit tests (no hardware needed)
+  # ──────────────────────────────────────────────────────────
+  unit-tests:
+    name: "Unit Tests (native C++)"
+    runs-on: ubuntu-22.04
+    needs: build
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake nlohmann-json3-dev
+
+      - name: Configure
+        run: cmake -S tests -B tests/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tests
+        run: cmake --build tests/build
+
+      - name: Run tests
+        run: ctest --test-dir tests/build --output-on-failure
