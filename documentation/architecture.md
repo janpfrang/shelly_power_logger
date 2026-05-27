@@ -34,7 +34,7 @@ The **appliance under test** plugs into the Shelly socket. The Shelly measures i
 
 ### ESP32 — Access Point (AP)
 
-The ESP32 creates and owns the Wi-Fi network. It is the equivalent of a router in this mini-system.
+The ESP32 creates and owns  the Wi-Fi network. It is the equivalent of a router in this mini-system.
 
 - **Broadcasts SSID:** `PZEM_Logger`
 - **Password:** `logger1234`
