@@ -47,6 +47,7 @@ private:
   void handleReset();
   void handleSettings();
   void handleReadme();
+  void handleHistogram();
   void handleLivePlot();
   void handleCaptivePortal();
   void handleNotFound();
