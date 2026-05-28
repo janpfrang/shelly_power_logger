@@ -24,7 +24,7 @@ BOM for improved functionalty including RTC and undervoltage protection
 | 6  |Housing      |distribution box, 100x100x50 mm          |Hardware store - Bauhaus         |             |1          |  1.99 €                           |
 | 7  |Socket      |hollow pin 5.5 - 2.1 mm             |Conrad          |             |   1       | 3.00 €                            | 
 | 8  |Real time clock |I2C DS3231 ZS042             |ebay         |             |   1       | 2.53€                            | 
-| 9  |R_bal 100 kOhms       |     100 k ohms      |    conrad      |  x 003359192 VitrOhm POS100JT-52-100KAA POS100JT-52-100KAA Metallschicht-Widerstand 100 kΩ THT 0207 1 W 5 % 1 St. CE 003359192 Produkt-ID: 003359192 Menge: 4           |   2       |           |  0.28 €
+| 9  |R_bal 100 kOhms       |     100 k ohms      |    conrad      |  x 003359192 VitrOhm POS100JT-52-100KAA POS100JT-52-100KAA Metallschicht-Widerstand 100 kΩ THT 0207 1 W 5 % 1 St. CE 003359192 Produkt-ID: 003359192 Menge: 4           |   2       |  0.28 €          | 
 | 10  |R1 180 kOhms       |           |          |             |   1       |                          | 
 | 11  |R2 47 kOhms       |           |          |             |   1       |                          | 
 | 12  |Diode 1N5822      | set of diods purchased (5x)      |          |             |   1       |              3.17 €           | 
