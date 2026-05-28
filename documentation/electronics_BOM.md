@@ -28,7 +28,7 @@ BOM for improved functionalty including RTC and undervoltage protection
 | 10  |R1 180 kOhms       |           |          |             |   1       |                          | 
 | 11  |R2 47 kOhms       |           |          |             |   1       |                          | 
 | 12  |Diode 1N5822      | set of diods purchased (5x)      |          |             |   1       |              3.17            | 
-| 13  |C1, C2       | Supercap 5.5V/1F           |          |             |   2       |                          | 
+| 13  |C1, C2       | Supercap 5.5V/1F           |          |             |   2       |             5.59             | 
 | 14  | R_inrushNTC      |  inrush limiterB57364S0100M000  (10 Ω cold)Disc THT 15 mm         |   ebay       |             |   1       |   6.00                       | 
 | 15  |U1 DC/DC converter       | TSR-1-2450SIP-3 THT  TracoPower         |   Conrad       |     000156673        |   1       |  6.49                        | 
 
