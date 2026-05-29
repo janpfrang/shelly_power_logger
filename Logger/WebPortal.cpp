@@ -857,28 +857,29 @@ void WebPortal::handleApiLive() {
   float v  = _logger.getLastVoltage();
   float pf = _logger.getLastPf();
 
+  // Build only the sensor part conditionally. The status fields
+  // (buffer/dropped/uptime/shelly_ok/sd_ok) are identical in both cases,
+  // so they are formatted exactly once below — adding a new status field
+  // now means editing one place, not two.
+  char sensor[72];
   if (isnan(p) || isnan(v) || isnan(pf)) {
-    snprintf(buf, sizeof(buf),
-      "{\"power\":null,\"voltage\":null,\"pf\":null,"
-      "\"buffer\":%u,\"dropped\":%lu,\"uptime\":%lu,"
-      "\"shelly_ok\":%s,\"sd_ok\":%s}",
-      (unsigned)_logger.getBufferCount(),
-      (unsigned long)_logger.getDroppedSamples(),
-      (unsigned long)(millis() / 1000),
-      _logger.shellyOk() ? "true" : "false",
-      _logger.sdOk()     ? "true" : "false");
+    snprintf(sensor, sizeof(sensor),
+             "\"power\":null,\"voltage\":null,\"pf\":null");
   } else {
-    snprintf(buf, sizeof(buf),
-      "{\"power\":%.1f,\"voltage\":%.1f,\"pf\":%.2f,"
-      "\"buffer\":%u,\"dropped\":%lu,\"uptime\":%lu,"
-      "\"shelly_ok\":%s,\"sd_ok\":%s}",
-      p, v, pf,
-      (unsigned)_logger.getBufferCount(),
-      (unsigned long)_logger.getDroppedSamples(),
-      (unsigned long)(millis() / 1000),
-      _logger.shellyOk() ? "true" : "false",
-      _logger.sdOk()     ? "true" : "false");
+    snprintf(sensor, sizeof(sensor),
+             "\"power\":%.1f,\"voltage\":%.1f,\"pf\":%.2f", p, v, pf);
   }
+
+  snprintf(buf, sizeof(buf),
+    "{%s,\"buffer\":%u,\"dropped\":%lu,\"uptime\":%lu,"
+    "\"shelly_ok\":%s,\"sd_ok\":%s}",
+    sensor,
+    (unsigned)_logger.getBufferCount(),
+    (unsigned long)_logger.getDroppedSamples(),
+    (unsigned long)(millis() / 1000),
+    _logger.shellyOk() ? "true" : "false",
+    _logger.sdOk()     ? "true" : "false");
+
   _server.send(200, "application/json", buf);
 }
 
