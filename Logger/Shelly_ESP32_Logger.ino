@@ -60,8 +60,9 @@ void setup() {
   Serial.println("=== Shelly ESP32 Logger v1 Start ===");
 
   // Pin modes
-  pinMode(PIN_BUTTON,  INPUT_PULLUP);   // future: manual reset (Req 25/26)
   pinMode(PIN_VSUPPLY, INPUT);          // future: supply monitor (Req 13)
+  // GPIO 33 (manual-reset button, Req 25/26) is not configured here:
+  // there is no code that reads it yet. Configure it when the handler exists.
 
   statusLed.begin();
   statusLed.setOk(false);   // error blink until init completes
@@ -71,7 +72,13 @@ void setup() {
     ensureLogHeader();
   }
 
-  webPortal.begin();   // starts AP+STA WiFi and HTTP server
+  if (!webPortal.begin()) {   // starts AP+STA WiFi and HTTP server
+    // softAP() failed — without the web server the device cannot receive
+    // Shelly pushes or serve the UI. Make the failure visible instead of
+    // continuing silently with a dead server.
+    Serial.println("[Setup] FEHLER: WebPortal konnte nicht gestartet werden!");
+    statusLed.setOk(false);
+  }
 
   Serial.println("[Setup] fertig — warte auf ersten Shelly-Push...");
   statusLed.setOk(false);   // stays red until first push arrives

@@ -26,8 +26,10 @@
 #define PIN_SD_CLK      27
 #define PIN_SD_MISO     26
 #define PIN_LED         32
-#define PIN_BUTTON      33   // INPUT_PULLUP — manual reset (future, Req 25/26)
 #define PIN_VSUPPLY     35   // ADC — supply monitoring (future, Req 13)
+// GPIO 33 is reserved for a future manual-reset button (Req 25/26).
+// It is intentionally NOT defined here: defining a pin that no code reads
+// is dead code. Add the #define together with the handler that uses it.
 
 // ===== Shelly Plug S MTR Gen3 =====
 // The Shelly joins the ESP32 softAP as a STA client.
