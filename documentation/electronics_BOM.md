@@ -17,7 +17,7 @@ BOM for improved functionalty including RTC and undervoltage protection and fuse
 | ID | Item | Description | Supplier | Supplier ID | Quantity | Price for Required Quantity |
 |----|------|-------------|----------|-------------|----------|-----------------------------|
 | 1  |  ESP32    |Node MCU / ESP-Wroom-32 (LX6)             | Reichelt         |             |    1      |         7.30 €                    |
-| 2  |(micro) SD-Shield      |SPI, best 3.3 without LDO             |Ebay          |             |1          | 4.00 €                            |
+| 2  |(micro) SD-Shield      |SPI, best 3.3 V without LDO - bare shield             |Ebay          |             |1          | 4.00 €                            |
 | 3  |micro SD-card      |FAT32 < 16 GB             |amazon - Intenso 16 GB          |             |1          | 4.00 €                            |
 | 4  |Power supply      |9 V with 5.5-2.1 mm jack, CE marked             |Conrad          |ID002355712             |1          | 8.49 €                             |
 | 5  |Shelly Plug S MTR Gen3      |power monitor plug adapter             |Conrad          |             |1          | 17.00 €                             |
