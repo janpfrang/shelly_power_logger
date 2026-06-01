@@ -1,14 +1,14 @@
 # Bill of Materials (BOM)
  
 **Title:** Power Monitor and Logger
-**Version:** V 1
-**Date:** 28 May 2026
+**Version:** V 1.01
+**Date:** 01 June 2026
  
 ---
  
 ## Information
  
-BOM for improved functionalty including RTC and undervoltage protection
+BOM for improved functionalty including RTC and undervoltage protection and fuse
  
 ---
  
