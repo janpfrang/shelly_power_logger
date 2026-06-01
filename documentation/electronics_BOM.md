@@ -31,10 +31,10 @@ BOM for improved functionalty including RTC and undervoltage protection and fuse
 | 13  |C1, C2       | Supercap 5.5V/1F           |  conrad        |  x 000457454 Samxon DDL105S05F1JRRDAPZ Doppelschicht-Kondensator 1 F 5.5 V 20 % (L x B x H) 17.5 x 9 x 19.5 mm 1 St.CE 000457454 Menge: 2           |   2       |             5.59 €            | 
 | 14  | R_inrushNTC      |  inrush limiterB57364S0100M000  (10 Ω cold)Disc THT 15 mm         |   ebay       |             |   1       |   6.00 €                      | 
 | 15  |U1 DC/DC converter       | 000156673 TracoPower TSR 1-2450 DC/DC-Wandler, Print 24 V/DC 5 V/DC 1 A 6 W Anzahl Ausgänge: 1 x Inhalt 1 St.CE 000156673 Produkt-ID: 000156673         |   Conrad       |     000156673        |   1       |  6.49 €                       | 
-| 16  |TVS diode       |          |       |            |   1       |  ?.?? €                     | 
+| 16  |surpressor diode 12.8 V      |    Littlefuse P6KE15A      |eu.mouser.com       |     Mouser No:576-P6KE15A Mfr. No:P6KE15A       |   1       |  0.46 €                     |
 | 17  |Current limiting fuse 0.5A slow |  Feinsicherung 5x20mm, träge 0,5A        |    reichelt.de   |           Artikel-Nr.: TR 0,5A Hst.-Teile-Nr.: 522.514 |   1       |  0.48 €                     | 
 | 18  |fuse folder      |   Sicherungshalter, 5x20mm, print, mit Abdeckkappe       | reichelt.de      |    Artikel-Nr.: MTA 506000 / Hst.-Teile-Nr.: 506000        |   1       |  0.32 €                     | 
-| 19  |surpressor diode 12.8 V      |    Littlefuse P6KE15A      |eu.mouser.com       |     Mouser No:576-P6KE15A Mfr. No:P6KE15A       |   1       |  0.46 €                     |
+| 19  |      |          |       |            |          |                      |
 | 17  |empty on purpose      |          |       |            |   1       |  ?.?? €                     | 
 
 ---
