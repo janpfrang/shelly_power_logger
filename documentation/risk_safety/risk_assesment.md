@@ -47,7 +47,7 @@ The logger measures AC voltage, current, and active power via a Shelly Plug S MT
 
 | Component | Function | Certification | Notes |
 |-----------|----------|---------------|-------|
-| Shelly Plug S MTR Gen3 | Mains smart plug | CE / RED certified | 230 V AC, max 16 A / 3680 W — mains interface; not modified |
+| Shelly Plug S MTR Gen3 | Mains smart plug | CE / RED certified | 230 V AC, max 12 A / 2500 W — mains interface; not modified |
 | 230 V → 9 V DC PSU | Mains adapter | CE certified (purchased) | Provides 9 V DC to enclosure; mains conversion internal to PSU |
 | EPCOS B57364S0100M000 NTC | Inrush limiter | EPCOS / TDK component | 10 Ω cold / 7.5 A rated. First component after barrel jack. Limits supercap inrush to ~900 mA peak; returns to full cold resistance each power cycle |
 | 2× supercap 5.5 V / 1 F (series) | Undervoltage buffer | RoHS compliant EDLC | Series: 11 V combined rating vs 9 V rail (2 V / 22% headroom). 100 kΩ balancing per cell. Holdover ~5–6 s at nominal load. ~30 mJ stored energy at 9 V |
