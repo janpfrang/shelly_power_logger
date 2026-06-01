@@ -4,36 +4,36 @@
  *
  * Changes vs. v6 (Shelly + ESP32):
  *
- *  1. PAGE_OTA  — new PROGMEM page: drag-and-drop .bin upload form with
+ *  1. PAGE_OTA  -- new PROGMEM page: drag-and-drop .bin upload form with
  *     live progress bar and automatic redirect after successful flash.
  *
- *  2. GET /update   — serves PAGE_OTA
- *     POST /update  — streams firmware binary to Update.h flash writer.
+ *  2. GET /update   -- serves PAGE_OTA
+ *     POST /update  -- streams firmware binary to Update.h flash writer.
  *     Both routes registered in begin().
  *
- *  3. handleOtaForm()   — trivial send_P of PAGE_OTA
- *     handleOtaUpload() — sends final HTTP 200/500 response after upload
- *     handleOtaChunk()  — per-chunk upload callback; calls Update.write()
+ *  3. handleOtaForm()   -- trivial send_P of PAGE_OTA
+ *     handleOtaUpload() -- sends final HTTP 200/500 response after upload
+ *     handleOtaChunk()  -- per-chunk upload callback; calls Update.write()
  *
- *  4. GET /api/live  — adds "ota_active" boolean so the home page can
+ *  4. GET /api/live  -- adds "ota_active" boolean so the home page can
  *     display an "Update in progress" banner during flash.
  *     API_BUFFER_SIZE 320 in Config.h remains sufficient
- *     (worst-case JSON is ~146 chars — no Config.h change needed).
+ *     (worst-case JSON is ~146 chars -- no Config.h change needed).
  *
- *  5. Home page (PAGE_INDEX) — OTA button added to the button grid,
+ *  5. Home page (PAGE_INDEX) -- OTA button added to the button grid,
  *     "ota_active" banner shown/hidden by the existing refresh() loop.
  *
- *  6. README page (PAGE_README) — OTA section added to the page table.
+ *  6. README page (PAGE_README) -- OTA section added to the page table.
  *
- *  Everything else — all other pages, routes, handlers, Wi-Fi setup,
- *  captive portal, Shelly push, settings, SD download/reset — UNCHANGED.
+ *  Everything else -- all other pages, routes, handlers, Wi-Fi setup,
+ *  captive portal, Shelly push, settings, SD download/reset -- UNCHANGED.
  */
 
 #include "WebPortal.h"
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE_INDEX  — identical structure to v5; only label change
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// PAGE_INDEX  -- identical structure to v5; only label change
+// -----------------------------------------------------------------------------
 static const char PAGE_INDEX[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="de"><head>
 <meta charset="UTF-8">
@@ -71,13 +71,13 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
 
 <h1>BRAUN Shelly Power Logger</h1>
 
-<div id="ota-banner" class="banner">⬆ Firmware-Update läuft — bitte warten…</div>
+<div id="ota-banner" class="banner">&#x2B06; Firmware-Update l&auml;uft &mdash; bitte warten&hellip;</div>
 
 <div class="card">
   <div class="label">Aktuelle Werte</div>
-  <div class="live"><span id="power">—</span> W</div>
+  <div class="live"><span id="power">&mdash;</span> W</div>
   <div class="sub-live">
-    <span id="voltage">—</span> V &nbsp;|&nbsp; pf<sub>apparent</sub>: <span id="pf">—</span>
+    <span id="voltage">&mdash;</span> V &nbsp;|&nbsp; pf<sub>apparent</sub>: <span id="pf">&mdash;</span>
   </div>
   <hr style="border: 0; border-top: 1px solid #eee; margin: 1em 0;">
   <div class="status">
@@ -91,19 +91,19 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
 
 <div class="card">
   <div class="btn-row">
-    <button onclick="location.href='/liveplot'" style="background: #28a745;">📈 Live Plot</button>
-    <button onclick="location.href='/histogram'" style="background: #17a2b8;">📊 Histogram</button>
+    <button onclick="location.href='/liveplot'" style="background: #28a745;">&#x1F4C8; Live Plot</button>
+    <button onclick="location.href='/histogram'" style="background: #17a2b8;">&#x1F4CA; Histogram</button>
     <button onclick="location.href='/download'">Download Log Files</button>
     <button class="danger" onclick="confirmReset()">Reset &amp; Delete SD</button>
     <button class="muted" onclick="location.href='/settings'">Settings</button>
     <button class="muted" onclick="location.href='/readme'">Read Me</button>
-    <button class="muted" onclick="location.href='/update'">⬆ Firmware Update</button>
+    <button class="muted" onclick="location.href='/update'">&#x2B06; Firmware Update</button>
   </div>
 </div>
 
 <script>
 function confirmReset() {
-  if (!confirm('Wirklich alle Log-Daten auf der SD-Karte löschen?')) return;
+  if (!confirm('Wirklich alle Log-Daten auf der SD-Karte l&ouml;schen?')) return;
   fetch('/reset', { method: 'POST' })
     .then(r => r.text())
     .then(t => alert(t))
@@ -115,9 +115,9 @@ async function refresh() {
     const r = await fetch('/api/live');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
-    document.getElementById('power').textContent   = d.power   === null ? '—' : d.power.toFixed(1);
-    document.getElementById('voltage').textContent = d.voltage === null ? '—' : d.voltage.toFixed(1);
-    document.getElementById('pf').textContent      = d.pf      === null ? '—' : d.pf.toFixed(2);
+    document.getElementById('power').textContent   = d.power   === null ? '&mdash;' : d.power.toFixed(1);
+    document.getElementById('voltage').textContent = d.voltage === null ? '&mdash;' : d.voltage.toFixed(1);
+    document.getElementById('pf').textContent      = d.pf      === null ? '&mdash;' : d.pf.toFixed(2);
     document.getElementById('buf').textContent     = d.buffer;
     document.getElementById('drop').textContent    = d.dropped;
     document.getElementById('uptime').textContent  = d.uptime;
@@ -130,9 +130,9 @@ async function refresh() {
     document.getElementById('ota-banner').style.display =
       d.ota_active ? 'block' : 'none';
   } catch (e) {
-    document.getElementById('power').textContent   = '—';
-    document.getElementById('voltage').textContent = '—';
-    document.getElementById('pf').textContent      = '—';
+    document.getElementById('power').textContent   = '&mdash;';
+    document.getElementById('voltage').textContent = '&mdash;';
+    document.getElementById('pf').textContent      = '&mdash;';
   }
 }
 refresh();
@@ -141,14 +141,14 @@ setInterval(refresh, 1000);
 </body></html>
 )HTML";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE_SETTINGS  — rate buttons updated; pf label updated
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// PAGE_SETTINGS  -- rate buttons updated; pf label updated
+// -----------------------------------------------------------------------------
 static const char PAGE_SETTINGS[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Settings – PZEM Logger</title>
+<title>Settings &ndash; PZEM Logger</title>
 <style>
   body { font-family: sans-serif; max-width: 600px; margin: 1em auto;
          padding: 1em; background: #f5f5f5; color: #222; }
@@ -190,7 +190,7 @@ static const char PAGE_SETTINGS[] PROGMEM = R"HTML(
 
 <div class="card">
   <h2>Sampling Rate</h2>
-  <p class="current">Current rate: <span id="cur-rate">…</span></p>
+  <p class="current">Current rate: <span id="cur-rate">&hellip;</span></p>
   <!-- 200 ms / 500 ms removed: Shelly meter updates at ~1 Hz (Req 21) -->
   <div class="grid-container" id="rate-grid">
     <div class="setting-btn rate-btn" data-ms="1000" >1 / s</div>
@@ -203,7 +203,7 @@ static const char PAGE_SETTINGS[] PROGMEM = R"HTML(
   <hr style="border: 0; border-top: 1px solid #eee; margin: 1.5em 0;">
 
   <h2>Logging Power Threshold</h2>
-  <p class="current">Log data if power exceeds: <span id="cur-thresh">…</span></p>
+  <p class="current">Log data if power exceeds: <span id="cur-thresh">&hellip;</span></p>
   <div class="grid-container" id="thresh-grid">
     <div class="setting-btn thresh-btn" data-w="0">0 W (No Limit)</div>
     <div class="setting-btn thresh-btn" data-w="1">1 W</div>
@@ -221,7 +221,7 @@ static const char PAGE_SETTINGS[] PROGMEM = R"HTML(
   <p class="note">Changes take effect immediately and are kept until the device is restarted.</p>
 </div>
 
-<a class="back" href="/">← Back</a>
+<a class="back" href="/">&larr; Back</a>
 
 <script>
 let selectedMs = null;
@@ -309,13 +309,13 @@ loadSettings();
 </body></html>
 )HTML";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE_LIVEPLOT  — minimum fetch interval raised to 1000 ms (Req 24 / Req 21)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// PAGE_LIVEPLOT  -- minimum fetch interval raised to 1000 ms (Req 24 / Req 21)
+// -----------------------------------------------------------------------------
 static const char PAGE_LIVEPLOT[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="de"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Live Scope – Shelly Logger</title>
+<title>Live Scope &ndash; Shelly Logger</title>
 <style>
   body { font-family: sans-serif; max-width: 650px; margin: 1em auto; padding: 1em;
          background: #f5f5f5; color: #222; }
@@ -335,14 +335,14 @@ static const char PAGE_LIVEPLOT[] PROGMEM = R"HTML(
 <h1>Echtzeit Leistungsprofil</h1>
 <div class="card">
   <div class="metrics-row">
-    <div>Aktuell: <span id="val-w">—</span> W</div>
-    <div>Spannung: <span id="val-v">—</span> V</div>
-    <div>Max: <span id="val-max">—</span> W</div>
+    <div>Aktuell: <span id="val-w">&mdash;</span> W</div>
+    <div>Spannung: <span id="val-v">&mdash;</span> V</div>
+    <div>Max: <span id="val-max">&mdash;</span> W</div>
   </div>
   <canvas id="scopeCanvas" width="600" height="280"></canvas>
-  <div class="legend">Timeline-Profil — Automatische Skalierung der Ordinate</div>
+  <div class="legend">Timeline-Profil &mdash; Automatische Skalierung der Ordinate</div>
 </div>
-<a class="back" href="/">← Zurück</a>
+<a class="back" href="/">&larr; Zur&uuml;ck</a>
 
 <script>
 const canvas = document.getElementById('scopeCanvas');
@@ -376,7 +376,7 @@ function startScopeLoop() {
       if (powerData.length > maxDataPoints) powerData.shift();
       renderChart();
     } catch(e) {
-      document.getElementById('val-w').textContent = '—';
+      document.getElementById('val-w').textContent = '&mdash;';
     }
   }, fetchIntervalMs);
 }
@@ -430,12 +430,12 @@ initScope();
 </body></html>
 )HTML";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE_README  — updated for Shelly architecture
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// PAGE_README  -- updated for Shelly architecture
+// -----------------------------------------------------------------------------
 static const char PAGE_README[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>
-<meta charset="UTF-8"><title>Read Me – Shelly Logger</title>
+<meta charset="UTF-8"><title>Read Me &ndash; Shelly Logger</title>
 <style>
   body { font-family: sans-serif; max-width: 640px; margin: 2em auto;
          padding: 1em; line-height: 1.6; color: #222; }
@@ -462,37 +462,37 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
 
 <h2>Hardware</h2>
 <ul>
-  <li><strong>Shelly Plug S MTR Gen3</strong> — CE-marked, max 16 A / 3680 W.
+  <li><strong>Shelly Plug S MTR Gen3</strong> &mdash; CE-marked, max 16 A / 3680 W.
       Measures voltage, current, active power. Pushes data to the ESP32 every 1 s.</li>
-  <li><strong>ESP32-WROOM-32</strong> — runs the web server, buffers samples in RAM,
+  <li><strong>ESP32-WROOM-32</strong> &mdash; runs the web server, buffers samples in RAM,
       writes to SD card.</li>
-  <li><strong>MicroSD card</strong> — permanent CSV log storage.</li>
-  <li><strong>230 V → 5 V PSU</strong> — powers the ESP32 only. Must be a certified
+  <li><strong>MicroSD card</strong> &mdash; permanent CSV log storage.</li>
+  <li><strong>230 V &rarr; 5 V PSU</strong> &mdash; powers the ESP32 only. Must be a certified
       mains-rated supply.</li>
 </ul>
 
 <h2>Connecting to the logger</h2>
 <ol>
-  <li>Power on the ESP32 — Wi-Fi access point
+  <li>Power on the ESP32 &mdash; Wi-Fi access point
       <code>PZEM_Logger</code> / password <code>logger1234</code> appears within ~3 s.</li>
-  <li>Power on the Shelly Plug S — it automatically joins <code>PZEM_Logger</code>
+  <li>Power on the Shelly Plug S &mdash; it automatically joins <code>PZEM_Logger</code>
       and starts pushing measurements.</li>
   <li>Connect your phone or laptop to <code>PZEM_Logger</code>.</li>
   <li>Open a browser and go to
       <a href="http://192.168.4.1">http://192.168.4.1</a>
       &nbsp;or&nbsp;
       <a href="http://braun_PZEM.local">http://braun_PZEM.local</a>
-      (mDNS — works on iOS, macOS, most Android).</li>
+      (mDNS &mdash; works on iOS, macOS, most Android).</li>
 </ol>
 
 <div class="note">
   <strong>Shelly web interface:</strong> while connected to <code>PZEM_Logger</code>
   the Shelly itself is reachable at <code>http://192.168.4.2</code>
-  (or whichever IP the ESP32 DHCP server assigned — check the status badge on the
+  (or whichever IP the ESP32 DHCP server assigned &mdash; check the status badge on the
   home screen if unsure). Use this to update Shelly firmware or change its script.
 </div>
 
-<h2>Web interface — page by page</h2>
+<h2>Web interface &mdash; page by page</h2>
 
 <table>
   <tr><th>Page</th><th>What it does</th></tr>
@@ -523,9 +523,9 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
   <tr>
     <td><strong>Settings</strong><br><code>/settings</code></td>
     <td>
-      <em>Sampling rate</em> — how often a measurement is taken from the Shelly
+      <em>Sampling rate</em> &mdash; how often a measurement is taken from the Shelly
       and stored in the buffer: 1 s, 2 s, 5 s, 10 s, or 30 s.<br>
-      <em>Power threshold</em> — only log a sample if active power ≥ this value.
+      <em>Power threshold</em> &mdash; only log a sample if active power &ge; this value.
       Set to 0 W to log everything including standby. Useful to avoid filling
       the SD card with idle readings.<br>
       Changes take effect immediately but are lost on reboot.
@@ -534,9 +534,9 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
   <tr>
     <td><strong>Firmware Update</strong><br><code>/update</code></td>
     <td>Over-the-air firmware update. Select a compiled <code>.bin</code> file
-        (from Arduino IDE: <em>Sketch → Export Compiled Binary</em>), then click
+        (from Arduino IDE: <em>Sketch &rarr; Export Compiled Binary</em>), then click
         Upload. A progress bar shows transfer progress. The ESP32 reboots
-        automatically on success — the page will redirect to <code>/</code>
+        automatically on success &mdash; the page will redirect to <code>/</code>
         after 8 seconds. The SD log is flushed before flashing so no data is
         lost. Logging resumes automatically after reboot.</td>
   </tr>
@@ -552,8 +552,8 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
       <td>Mains voltage measured by Shelly</td></tr>
   <tr><td><code>power_W</code></td><td>W</td>
       <td>Active power (apower) measured by Shelly</td></tr>
-  <tr><td><code>pf_apparent</code></td><td>—</td>
-      <td>Derived: power_W / (voltage_V × current_A). Range 0–1.
+  <tr><td><code>pf_apparent</code></td><td>&mdash;</td>
+      <td>Derived: power_W / (voltage_V &times; current_A). Range 0&ndash;1.
           Close to 1 for resistive loads (heater, kettle),
           lower for motors or switching supplies.</td></tr>
 </table>
@@ -568,24 +568,24 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
 
 <h2>LED status</h2>
 <ul>
-  <li><strong>1 Hz blink</strong> — system healthy (Shelly pushing, SD OK)</li>
-  <li><strong>5 Hz blink</strong> — error (Shelly silent for &gt;3 s, or SD fault)</li>
+  <li><strong>1 Hz blink</strong> &mdash; system healthy (Shelly pushing, SD OK)</li>
+  <li><strong>5 Hz blink</strong> &mdash; error (Shelly silent for &gt;3 s, or SD fault)</li>
 </ul>
 
 <p style="margin-top:1.5em"><strong>Contact:</strong>
 <a href="mailto:jan.pfrang@delonghigroup.com">jan.pfrang@delonghigroup.com</a></p>
-<p><a href="/">← Back</a></p>
+<p><a href="/">&larr; Back</a></p>
 
 </body></html>
 )HTML";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE_HISTOGRAM  — live power distribution since page load
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// PAGE_HISTOGRAM  -- live power distribution since page load
+// -----------------------------------------------------------------------------
 static const char PAGE_HISTOGRAM[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Power Histogram – Shelly Logger</title>
+<title>Power Histogram &ndash; Shelly Logger</title>
 <style>
   body { font-family: sans-serif; max-width: 650px; margin: 1em auto;
          padding: 1em; background: #f5f5f5; color: #222; }
@@ -615,20 +615,20 @@ static const char PAGE_HISTOGRAM[] PROGMEM = R"HTML(
 <div class="card">
   <div class="meta">
     <span>Samples: <strong id="n-samples">0</strong></span>
-    <span>Max recorded: <strong id="max-w">— W</strong></span>
-    <span>Current: <strong id="cur-w">— W</strong></span>
-    <span>Bin width: <strong id="bin-w">—</strong></span>
+    <span>Max recorded: <strong id="max-w">&mdash; W</strong></span>
+    <span>Current: <strong id="cur-w">&mdash; W</strong></span>
+    <span>Bin width: <strong id="bin-w">&mdash;</strong></span>
   </div>
 
   <canvas id="histCanvas" width="600" height="300"></canvas>
-  <div class="legend">20 equal bins — upper edge = max recorded power since page load</div>
+  <div class="legend">20 equal bins &mdash; upper edge = max recorded power since page load</div>
 
   <div class="btn-row">
     <button onclick="resetData()">Reset</button>
   </div>
 </div>
 
-<a class="back" href="/">← Back</a>
+<a class="back" href="/">&larr; Back</a>
 
 <script>
 const BINS      = 20;
@@ -643,7 +643,7 @@ let pollMs   = 1000;       // synced from /api/settings on startup
 const canvas = document.getElementById('histCanvas');
 const ctx    = canvas.getContext('2d');
 
-// ── Fetch current poll interval so we match the device cadence ───────────────
+// &mdash;&mdash; Fetch current poll interval so we match the device cadence &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
 async function init() {
   try {
     const r = await fetch('/api/settings');
@@ -654,7 +654,7 @@ async function init() {
   tick();
 }
 
-// ── Called every poll interval ────────────────────────────────────────────────
+// &mdash;&mdash; Called every poll interval &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
 async function tick() {
   try {
     const r = await fetch('/api/live');
@@ -671,10 +671,10 @@ async function tick() {
     document.getElementById('cur-w').textContent     = p.toFixed(1) + ' W';
 
     draw();
-  } catch(e) { /* network hiccup — skip tick */ }
+  } catch(e) { /* network hiccup &mdash; skip tick */ }
 }
 
-// ── Build bins and draw ───────────────────────────────────────────────────────
+// &mdash;&mdash; Build bins and draw &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
 function buildBins() {
   // Guard: if max is 0 (all readings are 0) use 1 W as a floor so bins exist
   const upper = maxPower > 0 ? maxPower : 1;
@@ -701,12 +701,12 @@ function draw() {
   const { counts, width, upper } = buildBins();
   const maxCount = Math.max(...counts, 1);
 
-  // ── Layout constants ──────────────────────────────────────────────────────
+  // &mdash;&mdash; Layout constants &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   const pL = 52, pR = 12, pT = 16, pB = 38;
   const gW = W - pL - pR;
   const gH = H - pT - pB;
 
-  // ── Y-axis gridlines and labels ───────────────────────────────────────────
+  // &mdash;&mdash; Y-axis gridlines and labels &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   ctx.font      = '11px monospace';
   ctx.fillStyle = '#8e8e93';
   ctx.strokeStyle = '#1e1e26';
@@ -727,7 +727,7 @@ function draw() {
     }
   }
 
-  // ── Bars ──────────────────────────────────────────────────────────────────
+  // &mdash;&mdash; Bars &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   const barSlot = gW / BINS;
   const barGap  = Math.max(1, barSlot * 0.08);
   const barW    = barSlot - barGap;
@@ -747,7 +747,7 @@ function draw() {
     ctx.fill();
   }
 
-  // ── X-axis labels (every 5th bin) ─────────────────────────────────────────
+  // &mdash;&mdash; X-axis labels (every 5th bin) &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   ctx.fillStyle    = '#8e8e93';
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'top';
@@ -757,7 +757,7 @@ function draw() {
     ctx.fillText(label, xPos, pT + gH + 6);
   }
 
-  // ── Axes outline ──────────────────────────────────────────────────────────
+  // &mdash;&mdash; Axes outline &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   ctx.strokeStyle = '#44444f';
   ctx.lineWidth   = 1;
   ctx.strokeRect(pL, pT, gW, gH);
@@ -767,9 +767,9 @@ function resetData() {
   samples  = [];
   maxPower = 0;
   document.getElementById('n-samples').textContent = '0';
-  document.getElementById('max-w').textContent     = '— W';
-  document.getElementById('cur-w').textContent     = '— W';
-  document.getElementById('bin-w').textContent     = '—';
+  document.getElementById('max-w').textContent     = '&mdash; W';
+  document.getElementById('cur-w').textContent     = '&mdash; W';
+  document.getElementById('bin-w').textContent     = '&mdash;';
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
@@ -778,19 +778,19 @@ init();
 </body></html>
 )HTML";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE_OTA  — firmware upload form
+// -----------------------------------------------------------------------------
+// PAGE_OTA  -- firmware upload form
 // Accepts a single .bin file via multipart POST to /update.
 // Progress bar driven by XMLHttpRequest upload events (avoids fetch() which
 // gives no progress on most mobile browsers).
 // On success the page auto-redirects to / after 8 s (long enough for reboot).
 // On error it shows the server's error text and offers a retry link.
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 static const char PAGE_OTA[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Firmware Update – Shelly Logger</title>
+<title>Firmware Update &ndash; Shelly Logger</title>
 <style>
   body { font-family: sans-serif; max-width: 560px; margin: 2em auto;
          padding: 1em; background: #f5f5f5; color: #222; }
@@ -838,14 +838,14 @@ static const char PAGE_OTA[] PROGMEM = R"HTML(
 
   <p class="note">
     Export the binary from Arduino IDE via
-    <em>Sketch → Export Compiled Binary</em>, then select the
+    <em>Sketch &rarr; Export Compiled Binary</em>, then select the
     <code>*.bin</code> (not <code>*.elf</code>) file above.<br>
     The device will reboot automatically after a successful flash.
-    Logging resumes on its own — no further action needed.
+    Logging resumes on its own &mdash; no further action needed.
   </p>
 </div>
 
-<a class="back" href="/">← Back to home</a>
+<a class="back" href="/">&larr; Back to home</a>
 
 <script>
 function startUpload() {
@@ -873,7 +873,7 @@ function startUpload() {
 
   const xhr = new XMLHttpRequest();
 
-  // ── Progress ──────────────────────────────────────────────────────────────
+  // &mdash;&mdash; Progress &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   xhr.upload.onprogress = function(e) {
     if (!e.lengthComputable) return;
     const pct = Math.round((e.loaded / e.total) * 100);
@@ -881,32 +881,32 @@ function startUpload() {
     progBar.textContent  = pct + '%';
   };
 
-  // ── Done ──────────────────────────────────────────────────────────────────
+  // &mdash;&mdash; Done &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   xhr.onload = function() {
     if (xhr.status === 200) {
       progBar.style.width  = '100%';
       progBar.style.background = '#28a745';
       progBar.textContent  = '100%';
-      showMsg('✓ Flash successful — device is rebooting. ' +
-              'Redirecting to home in 8 s…', 'ok');
+      showMsg('&#x2713; Flash successful &mdash; device is rebooting. ' +
+              'Redirecting to home in 8 s&hellip;', 'ok');
       setTimeout(function() { location.href = '/'; }, 8000);
     } else {
-      showMsg('✗ Upload failed (HTTP ' + xhr.status + '): ' +
+      showMsg('&#x2717; Upload failed (HTTP ' + xhr.status + '): ' +
               xhr.responseText, 'err');
       btn.disabled = false;
     }
   };
 
-  // ── Network error ─────────────────────────────────────────────────────────
+  // &mdash;&mdash; Network error &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   // A network error here is actually EXPECTED on success: the ESP32 reboots
   // mid-response.  If we already showed the 100% bar, treat it as success.
   xhr.onerror = function() {
     if (progBar.textContent === '100%') {
-      showMsg('✓ Flash likely successful — device rebooting. ' +
-              'Redirecting to home in 8 s…', 'ok');
+      showMsg('&#x2713; Flash likely successful &mdash; device rebooting. ' +
+              'Redirecting to home in 8 s&hellip;', 'ok');
       setTimeout(function() { location.href = '/'; }, 8000);
     } else {
-      showMsg('✗ Network error — check device and try again.', 'err');
+      showMsg('&#x2717; Network error &mdash; check device and try again.', 'err');
       btn.disabled = false;
     }
   };
@@ -928,9 +928,9 @@ function hideMsg() {
 </body></html>
 )HTML";
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Implementation
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 WebPortal::WebPortal(Logger& logger, ShellyClient& shelly)
   : _logger(logger), _shelly(shelly), _server(HTTP_PORT) {}
@@ -955,13 +955,13 @@ bool WebPortal::begin() {
   _dns.start(DNS_PORT, "*", ip);
   Serial.println("[Web] DNS-Server gestartet (catch-all)");
 
-  // mDNS — braun_PZEM.local  (Req: plain-text hostname)
+  // mDNS -- braun_PZEM.local  (Req: plain-text hostname)
   if (MDNS.begin(WIFI_AP_HOSTNAME)) {
     MDNS.addService("http", "tcp", HTTP_PORT);
     Serial.printf("[Web] mDNS aktiv: http://%s.local\n", WIFI_AP_HOSTNAME);
   }
 
-  // ── Captive portal probes ──────────────────────────────────────────────
+  // -- Captive portal probes ----------------------------------------------
   _server.on("/generate_204",              HTTP_GET, [this](){ handleCaptivePortal(); });
   _server.on("/gen_204",                   HTTP_GET, [this](){ handleCaptivePortal(); });
   _server.on("/hotspot-detect.html",       HTTP_GET, [this](){ handleCaptivePortal(); });
@@ -971,7 +971,7 @@ bool WebPortal::begin() {
   _server.on("/redirect",                  HTTP_GET, [this](){ handleCaptivePortal(); });
   _server.on("/canonical.html",            HTTP_GET, [this](){ handleCaptivePortal(); });
 
-  // ── Application routes (unchanged from v5 except /api/shelly_push) ──────
+  // -- Application routes (unchanged from v5 except /api/shelly_push) ------
   _server.on("/",                    HTTP_GET,  [this](){ handleRoot(); });
   _server.on("/api/live",            HTTP_GET,  [this](){ handleApiLive(); });
   _server.on("/api/settings",        HTTP_GET,  [this](){ handleApiSettings(); });
@@ -1001,9 +1001,9 @@ void WebPortal::update() {
   _server.handleClient();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Handlers
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 void WebPortal::handleRoot() {
   _server.send_P(200, "text/html", PAGE_INDEX);
@@ -1014,7 +1014,7 @@ void WebPortal::handleCaptivePortal() {
   _server.send(302, "text/plain", "");
 }
 
-// ── NEW: receives push from shelly_push.js ────────────────────────────────
+// -- NEW: receives push from shelly_push.js --------------------------------
 void WebPortal::handleShellyPush() {
   String body = _server.arg("plain");   // raw POST body
   if (body.length() == 0) {
@@ -1028,7 +1028,7 @@ void WebPortal::handleShellyPush() {
   }
 }
 
-// ── /api/live — includes shelly_ok (v6) and ota_active (v7) ─────────────
+// -- /api/live -- includes shelly_ok (v6) and ota_active (v7) -------------
 void WebPortal::handleApiLive() {
   char buf[API_BUFFER_SIZE];
   float p  = _logger.getLastPower();
@@ -1037,7 +1037,7 @@ void WebPortal::handleApiLive() {
 
   // Build only the sensor part conditionally. The status fields
   // (buffer/dropped/uptime/shelly_ok/sd_ok/ota_active) are identical in
-  // both cases, so they are formatted exactly once below — adding a new
+  // both cases, so they are formatted exactly once below -- adding a new
   // status field means editing one place, not two.
   char sensor[72];
   if (isnan(p) || isnan(v) || isnan(pf)) {
@@ -1077,9 +1077,9 @@ void WebPortal::handleDownload() {
 
 void WebPortal::handleReset() {
   if (_logger.resetSDFile()) {
-    _server.send(200, "text/plain", "Log-Datei wurde gelöscht und neu angelegt.");
+    _server.send(200, "text/plain", "Log-Datei wurde geloescht und neu angelegt.");
   } else {
-    _server.send(500, "text/plain", "Fehler beim Löschen der Log-Datei (SD nicht verfügbar?).");
+    _server.send(500, "text/plain", "Fehler beim Loeschen der Log-Datei (SD nicht verfuegbar?).");
   }
 }
 
@@ -1095,7 +1095,7 @@ void WebPortal::handleLivePlot() {
   _server.send_P(200, "text/html", PAGE_LIVEPLOT);
 }
 
-// ── GET /api/settings ─────────────────────────────────────────────────────
+// -- GET /api/settings -----------------------------------------------------
 void WebPortal::handleApiSettings() {
   char buf[128];
   snprintf(buf, sizeof(buf),
@@ -1105,7 +1105,7 @@ void WebPortal::handleApiSettings() {
   _server.send(200, "application/json", buf);
 }
 
-// ── POST /api/settings — poll_ms whitelist updated (200/500 removed) ──────
+// -- POST /api/settings -- poll_ms whitelist updated (200/500 removed) ------
 void WebPortal::handleApiSettingsSave() {
   if (_server.hasArg("poll_ms")) {
     uint32_t ms = (uint32_t)_server.arg("poll_ms").toInt();
@@ -1143,19 +1143,19 @@ void WebPortal::handleReadme() {
   _server.send_P(200, "text/html", PAGE_README);
 }
 
-// ── GET /update — serve the OTA upload form ───────────────────────────────
+// -- GET /update -- serve the OTA upload form -------------------------------
 void WebPortal::handleOtaForm() {
   _server.send_P(200, "text/html", PAGE_OTA);
 }
 
-// ── POST /update body handler — sends the final HTTP response ────────────
+// -- POST /update body handler -- sends the final HTTP response ------------
 //
 // WebServer calls this AFTER the last handleOtaChunk() invocation.
 // Update.end() has already been called inside the chunk handler, so here
 // we only check Update.hasError() and send the appropriate response.
 //
 // If the flash succeeded the ESP32 reboots inside ESP.restart() below;
-// the HTTP response may or may not reach the browser before the reboot —
+// the HTTP response may or may not reach the browser before the reboot --
 // PAGE_OTA handles both outcomes (the xhr.onerror path on the JS side).
 void WebPortal::handleOtaUpload() {
   if (Update.hasError()) {
@@ -1165,26 +1165,26 @@ void WebPortal::handleOtaUpload() {
     Serial.printf("[OTA] Fehlgeschlagen: %s\n", err.c_str());
     _server.send(500, "text/plain", "OTA fehlgeschlagen: " + err);
   } else {
-    // Success path — send 200 then reboot.
+    // Success path -- send 200 then reboot.
     // The response may be cut off mid-TCP by the reboot; PAGE_OTA JS
     // handles the resulting xhr.onerror as a successful outcome.
     _server.send(200, "text/plain", "OK");
     delay(200);   // give TCP stack a moment to flush
-    Serial.println("[OTA] Erfolgreich — Neustart...");
+    Serial.println("[OTA] Erfolgreich -- Neustart...");
     ESP.restart();
   }
 }
 
-// ── Upload chunk callback — called by WebServer for every multipart chunk ─
+// -- Upload chunk callback -- called by WebServer for every multipart chunk -
 //
 // Execution context: synchronous inside _server.handleClient(), same task
 // as loop().  No RTOS or ISR concerns.
 //
 // HTTPUpload fields used:
-//   status   — UPLOAD_FILE_START / UPLOAD_FILE_WRITE / UPLOAD_FILE_END / UPLOAD_FILE_ABORTED
-//   buf      — pointer to this chunk's data
-//   currentSize — number of valid bytes in buf this call
-//   totalSize   — total bytes received so far (increases each WRITE call)
+//   status   -- UPLOAD_FILE_START / UPLOAD_FILE_WRITE / UPLOAD_FILE_END / UPLOAD_FILE_ABORTED
+//   buf      -- pointer to this chunk's data
+//   currentSize -- number of valid bytes in buf this call
+//   totalSize   -- total bytes received so far (increases each WRITE call)
 void WebPortal::handleOtaChunk() {
   HTTPUpload& upload = _server.upload();
 
@@ -1203,7 +1203,7 @@ void WebPortal::handleOtaChunk() {
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       Serial.printf("[OTA] Update.begin() fehlgeschlagen: %s\n",
                     Update.errorString());
-      // Do NOT abort here — let handleOtaUpload() send the error response
+      // Do NOT abort here -- let handleOtaUpload() send the error response
       // so the HTTP transaction completes cleanly.
     }
 
@@ -1222,7 +1222,7 @@ void WebPortal::handleOtaChunk() {
     }
 
   } else if (upload.status == UPLOAD_FILE_END) {
-    Serial.printf("\n[OTA] Übertragen: %u Bytes — finalisiere...\n",
+    Serial.printf("\n[OTA] Uebertragen: %u Bytes -- finalisiere...\n",
                   upload.totalSize);
     // Finalise: verify the flash and mark the new partition as bootable.
     // Passing 'true' triggers MD5 verification if the image contains a hash.
@@ -1235,7 +1235,7 @@ void WebPortal::handleOtaChunk() {
     // Client disconnected mid-upload.
     Update.abort();
     _logger.setOtaInProgress(false);
-    Serial.println("[OTA] Upload abgebrochen — Logging wiederhergestellt");
+    Serial.println("[OTA] Upload abgebrochen -- Logging wiederhergestellt");
   }
 }
 
