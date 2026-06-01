@@ -19,7 +19,7 @@
  *
  * The Sample struct field "pf" is kept as-is in RAM.
  * The CSV header uses "pf_apparent" (Config.h LOG_FILE_HEADER).
- * No struct change is needed — the field stores whatever the caller puts in it.
+ * No struct change is needed — the field stores whatever the caller puts  in it.
  */
 
 #ifndef LOGGER_H
