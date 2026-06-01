@@ -977,10 +977,10 @@ bool WebPortal::begin() {
   _server.on("/api/settings",        HTTP_GET,  [this](){ handleApiSettings(); });
   _server.on("/api/settings",        HTTP_POST, [this](){ handleApiSettingsSave(); });
   _server.on("/api/shelly_push",     HTTP_POST, [this](){ handleShellyPush(); });   // v6
-  _server.on("/update",              HTTP_GET,  [this](){ handleOtaForm(); });      // v7
-  // POST /update: the body handler sends the final HTTP response;
+  _server.on(OTA_ENDPOINT,           HTTP_GET,  [this](){ handleOtaForm(); });      // v7
+  // POST OTA_ENDPOINT: the body handler sends the final HTTP response;
   // the upload (chunk) handler is registered separately via onFileUpload.
-  _server.on("/update",              HTTP_POST,
+  _server.on(OTA_ENDPOINT,           HTTP_POST,
     [this](){ handleOtaUpload(); },
     [this](){ handleOtaChunk(); });
   _server.on("/download",            HTTP_GET,  [this](){ handleDownload(); });
