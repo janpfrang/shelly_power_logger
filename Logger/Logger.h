@@ -5,47 +5,47 @@
  * Changes vs. v5
  * --------------
  *   ADDED  _otaInProgress flag (bool, default false)
- *   ADDED  setOtaInProgress(bool)  — called by WebPortal OTA handlers
- *   ADDED  isOtaInProgress()       — read by WebPortal for /api/live response
- *   CHANGED pollIfDue()   — returns immediately when OTA is active
- *   CHANGED flushIfDue()  — returns immediately when OTA is active;
+ *   ADDED  setOtaInProgress(bool)  -- called by WebPortal OTA handlers
+ *   ADDED  isOtaInProgress()       -- read by WebPortal for /api/live response
+ *   CHANGED pollIfDue()   -- returns immediately when OTA is active
+ *   CHANGED flushIfDue()  -- returns immediately when OTA is active;
  *                           flushes RAM buffer to SD BEFORE yielding to OTA
  *                           (called explicitly by WebPortal before Update.begin())
- *   UNCHANGED: everything else — ShellyClient, SD logic, RAM buffer,
+ *   UNCHANGED: everything else -- ShellyClient, SD logic, RAM buffer,
  *              FIFO-drop, SD recovery, all getters, Sample struct.
  *
  * OTA DESIGN RATIONALE
  * --------------------
  * OTA is handled entirely in WebPortal (POST /update route, Update.h).
- * Logger.h does NOT own or include Update.h — that would violate the
+ * Logger.h does NOT own or include Update.h -- that would violate the
  * single-responsibility split that makes this codebase testable.
  *
  * What Logger.h DOES contribute:
  *
- *   1. PAUSE during flash  — pollIfDue() and flushIfDue() are no-ops while
+ *   1. PAUSE during flash  -- pollIfDue() and flushIfDue() are no-ops while
  *      _otaInProgress is true.  This prevents:
- *        • a concurrent SD write from corrupting the filesystem mid-flash
+ *        * a concurrent SD write from corrupting the filesystem mid-flash
  *          (SD.open / SD.close share the same SPI bus; Update.h uses flash,
  *           not SPI, but the loop() timing jitter could still interleave)
- *        • misleading NAN values being cached while the Shelly watchdog trips
- *          (it will trip — that is expected and cosmetic; see note below)
+ *        * misleading NAN values being cached while the Shelly watchdog trips
+ *          (it will trip -- that is expected and cosmetic; see note below)
  *
- *   2. PRE-FLUSH before flash — WebPortal calls flushToSD() explicitly just
+ *   2. PRE-FLUSH before flash -- WebPortal calls flushToSD() explicitly just
  *      before calling Update.begin().  This ensures no logged samples are
  *      lost when the ESP32 reboots at the end of the update.
  *      flushToSD() is already public and unchanged.
  *
  * WATCHDOG NOTE
  * -------------
- * The Shelly push watchdog (SHELLY_ERROR_THRESHOLD × INTERVAL_SHELLY_POLL_MS
- * = 3 s) WILL trip during a firmware upload (typically 5–15 s for a 1 MB
+ * The Shelly push watchdog (SHELLY_ERROR_THRESHOLD x INTERVAL_SHELLY_POLL_MS
+ * = 3 s) WILL trip during a firmware upload (typically 5-15 s for a 1 MB
  * binary over Wi-Fi at ~1 Mbps).  The LED will blink at 5 Hz.
  * This is expected behaviour and resets automatically when the device
  * reboots and the Shelly resumes pushing.  No user action required.
  *
  * The Sample struct field "pf" is kept as-is in RAM.
  * The CSV header uses "pf_apparent" (Config.h LOG_FILE_HEADER).
- * No struct change is needed — the field stores whatever the caller puts in it.
+ * No struct change is needed -- the field stores whatever the caller puts in it.
  */
 
 #ifndef LOGGER_H
@@ -92,14 +92,14 @@ public:
     return _sdOk;
   }
 
-  // ── Runtime-adjustable settings (called from WebPortal) ──────────────────
+  // -- Runtime-adjustable settings (called from WebPortal) ------------------
   void     setPollInterval(uint32_t ms) { if (ms >= 1000) _pollIntervalMs = ms; }
   uint32_t getPollInterval()  const     { return _pollIntervalMs; }
 
   void  setPowerThreshold(float watts)  { _powerThresholdW = watts; }
   float getPowerThreshold()   const     { return _powerThresholdW; }
 
-  // ── OTA gate — called by WebPortal OTA handlers ───────────────────────────
+  // -- OTA gate -- called by WebPortal OTA handlers ---------------------------
   //
   // setOtaInProgress(true)  is called by WebPortal just before Update.begin().
   //   At that point WebPortal MUST also call flushToSD() explicitly so that
@@ -111,29 +111,29 @@ public:
   void setOtaInProgress(bool active) {
     if (active && !_otaInProgress) {
       // Flush whatever is in RAM before handing over to the OTA writer.
-      // This is a best-effort call — if SD is unavailable the samples are
+      // This is a best-effort call -- if SD is unavailable the samples are
       // lost, but that is preferable to leaving the SD file in a torn state.
       flushToSD();
-      Serial.println("[Logger] OTA gestartet — Logging pausiert");
+      Serial.println("[Logger] OTA gestartet -- Logging pausiert");
     }
     if (!active && _otaInProgress) {
-      Serial.println("[Logger] OTA abgebrochen — Logging wiederhergestellt");
+      Serial.println("[Logger] OTA abgebrochen -- Logging wiederhergestellt");
     }
     _otaInProgress = active;
   }
 
   bool isOtaInProgress() const { return _otaInProgress; }
 
-  // ── Called from loop() every iteration ───────────────────────────────────
+  // -- Called from loop() every iteration -----------------------------------
   //
   // pollIfDue() used to call _pzem.voltage() etc. synchronously.
   // Now it reads the last value cached by ShellyClient::ingest().
-  // The "poll interval" is still honoured — we don't push a sample to the
+  // The "poll interval" is still honoured -- we don't push a sample to the
   // ring-buffer more often than _pollIntervalMs even if the Shelly pushes
   // faster (it shouldn't, but belt-and-suspenders).
   void pollIfDue() {
     // Suspend all sampling while a firmware update is being written.
-    // The Shelly watchdog will trip (expected — see header note).
+    // The Shelly watchdog will trip (expected -- see header note).
     if (_otaInProgress) return;
 
     uint32_t now = millis();
@@ -141,8 +141,8 @@ public:
     _lastPollMs = now;
 
     // If the Shelly watchdog has timed out or data is not yet valid,
-    // do not push a sample — just update live display fields to NAN so
-    // the web UI shows "—" and the LED turns red.
+    // do not push a sample -- just update live display fields to NAN so
+    // the web UI shows "--" and the LED turns red.
     if (!_shelly.shellyOk() || !_shelly.hasData()) {
       _lastVoltage = NAN;
       _lastPower   = NAN;
@@ -165,7 +165,7 @@ public:
     }
   }
 
-  // ── SD flush on schedule (unchanged from v4) ─────────────────────────────
+  // -- SD flush on schedule (unchanged from v4) -----------------------------
   void flushIfDue() {
     // Do not touch the SD card while OTA is writing flash.
     // setOtaInProgress(true) already flushed the buffer synchronously.
@@ -182,7 +182,7 @@ public:
     flushToSD();
   }
 
-  // ── Public flush (called by /download handler before streaming) ──────────
+  // -- Public flush (called by /download handler before streaming) ----------
   bool flushToSD() {
     if (!_sdOk || _bufferCount == 0) return _sdOk;
 
@@ -209,7 +209,7 @@ public:
     return true;
   }
 
-  // ── Reset log file (POST /reset handler) — unchanged from v4 ─────────────
+  // -- Reset log file (POST /reset handler) -- unchanged from v4 -------------
   bool resetSDFile() {
     if (!_sdOk) return false;
     _bufferCount = 0;
@@ -223,11 +223,11 @@ public:
     if (!f) return false;
     f.println(LOG_FILE_HEADER);
     f.close();
-    Serial.println("[Logger] Log-Datei zurückgesetzt");
+    Serial.println("[Logger] Log-Datei zurueckgesetzt");
     return true;
   }
 
-  // ── Status accessors ─────────────────────────────────────────────────────
+  // -- Status accessors -----------------------------------------------------
   bool     shellyOk()          const { return _shelly.shellyOk(); }
   bool     sdOk()              const { return _sdOk; }
   bool     ok()                const { return shellyOk() && _sdOk; }  // drives LED
@@ -243,7 +243,7 @@ public:
   }
 
 private:
-  ShellyClient& _shelly;      // injected reference — not owned
+  ShellyClient& _shelly;      // injected reference -- not owned
   SPIClass      _sdSPI;
   Sample        _buffer[RAM_BUFFER_SIZE];
   size_t        _bufferCount;
@@ -259,7 +259,7 @@ private:
   uint32_t      _pollIntervalMs;
   float         _powerThresholdW;
 
-  // ── Ring-buffer push with FIFO-drop on overflow (unchanged from v4) ───────
+  // -- Ring-buffer push with FIFO-drop on overflow (unchanged from v4) -------
   void pushSample(const Sample& s) {
     if (_bufferCount < RAM_BUFFER_SIZE) {
       _buffer[_bufferCount++] = s;
@@ -285,7 +285,7 @@ private:
     return SD.begin(PIN_SD_CS, _sdSPI, 4000000);
   }
 
-  // ── SD auto-recovery every 30 s (unchanged from v4) ──────────────────────
+  // -- SD auto-recovery every 30 s (unchanged from v4) ----------------------
   void tryRecoverSD() {
     uint32_t now = millis();
     if (now - _lastSdRetryMs < 30000) return;
@@ -300,7 +300,7 @@ private:
         File f = SD.open(LOG_FILE_PATH, FILE_WRITE);
         if (f) { f.println(LOG_FILE_HEADER); f.close(); }
       }
-      Serial.println("[Logger] SD wieder verfügbar");
+      Serial.println("[Logger] SD wieder verfuegbar");
     }
   }
 };
