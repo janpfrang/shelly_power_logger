@@ -1,19 +1,11 @@
 /*
- * Config.h - Zentrale Konfiguration v5  (Shelly + ESP32)
- * =======================================================
+ * Config.h - Zentrale Konfiguration v6  (Shelly + ESP32 + OTA)
+ * =============================================================
  *
- * Changes vs. v4 (PZEM/ESP32):
- *   REMOVED  PIN_PZEM_RX, PIN_PZEM_TX          (PZEM hardware gone)
- *   REMOVED  INTERVAL_PZEM_POLL_MS              (renamed, see below)
- *   REMOVED  PZEM_ERROR_THRESHOLD               (renamed, see below)
- *   REMOVED  LOG_FILE_HEADER with "cos_phi"     (renamed column)
- *   ADDED    SHELLY_HOST                        (Shelly AP client IP / mDNS)
- *   ADDED    SHELLY_PUSH_ENDPOINT               (route ESP32 listens on)
- *   ADDED    SHELLY_ERROR_THRESHOLD             (replaces PZEM_ERROR_THRESHOLD)
- *   ADDED    INTERVAL_SHELLY_POLL_MS            (default 1000 ms, Shelly meter cadence)
- *   CHANGED  LOG_FILE_HEADER                    ("pf" → "pf_apparent")
- *   CHANGED  RAM_BUFFER_SIZE comment            (updated for 1 s cadence)
- *   ALL SD / LED / Button / ADC pins unchanged
+ * Changes vs. v5 (Shelly + ESP32):
+ *   ADDED    OTA_ENDPOINT  — route WebPortal listens on for firmware upload
+ *   CHANGED  API_BUFFER_SIZE comment  (ota_active field added to /api/live)
+ *   ALL other constants unchanged
  */
 
 #ifndef CONFIG_H
@@ -44,6 +36,7 @@
                                                   // Change to mDNS name if preferred:
                                                   // "shellyplugsg3-XXXXXX.local"
 #define SHELLY_PUSH_ENDPOINT    "/api/shelly_push"  // Must match shelly_push.js PUSH_URL
+#define OTA_ENDPOINT            "/update"            // Must match WebPortal route registration
 
 // Shelly push watchdog: if no push is received for this many consecutive
 // expected intervals, the Shelly is declared unreachable (→ LED_ERROR).
@@ -88,6 +81,6 @@
 
 // ===== Webserver =====
 #define HTTP_PORT        80
-#define API_BUFFER_SIZE  320   // increased from 256: /api/live now includes shelly_ok field
+#define API_BUFFER_SIZE  320   // sufficient for /api/live incl. shelly_ok + ota_active (~146 chars worst-case)
 
 #endif
