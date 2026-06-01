@@ -34,7 +34,7 @@ BOM for improved functionalty including RTC and undervoltage protection and fuse
 | 16  |TVS diode       |          |       |            |   1       |  ?.?? €                     | 
 | 17  |Current limiting fuse 0.5A slow |  Feinsicherung 5x20mm, träge 0,5A        |    reichelt.de   |           Artikel-Nr.: TR 0,5A Hst.-Teile-Nr.: 522.514 |   1       |  0.48 €                     | 
 | 18  |fuse folder      |   Sicherungshalter, 5x20mm, print, mit Abdeckkappe       | reichelt.de      |    Artikel-Nr.: MTA 506000 / Hst.-Teile-Nr.: 506000        |   1       |  0.32 €                     | 
-| 19  |surpressor diode 9.4 V      |    Littlefuse P6KE11A      |eu.mouser.com       |     Mouser No:576-P6KE11A       |   1       |  0.46 €                     |
+| 19  |surpressor diode 12.8 V      |    Littlefuse P6KE15A      |eu.mouser.com       |     Mouser No:576-P6KE15A Mfr. No:P6KE15A       |   1       |  0.46 €                     |
 | 17  |empty on purpose      |          |       |            |   1       |  ?.?? €                     | 
 
 ---
