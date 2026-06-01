@@ -1,28 +1,32 @@
 /*
- * WebPortal.cpp v6  (Shelly + ESP32)
- * ====================================
+ * WebPortal.cpp v7  (Shelly + ESP32 + OTA)
+ * ==========================================
  *
- * Changes vs. v5 (PZEM/ESP32):
+ * Changes vs. v6 (Shelly + ESP32):
  *
- *  1. WiFi.mode(WIFI_AP_STA)  — Option B: ESP32 is AP anchor for both the
- *     Shelly STA client and the user's phone.  No external router needed.
+ *  1. PAGE_OTA  — new PROGMEM page: drag-and-drop .bin upload form with
+ *     live progress bar and automatic redirect after successful flash.
  *
- *  2. POST /api/shelly_push   — new endpoint; calls ShellyClient::ingest().
- *     Returns HTTP 200 on success, 400 on parse error.
+ *  2. GET /update   — serves PAGE_OTA
+ *     POST /update  — streams firmware binary to Update.h flash writer.
+ *     Both routes registered in begin().
  *
- *  3. GET /api/live           — JSON now includes "shelly_ok" boolean field.
+ *  3. handleOtaForm()   — trivial send_P of PAGE_OTA
+ *     handleOtaUpload() — sends final HTTP 200/500 response after upload
+ *     handleOtaChunk()  — per-chunk upload callback; calls Update.write()
  *
- *  4. POST /api/settings      — poll_ms whitelist updated:
- *     { 1000, 2000, 5000, 10000, 30000 } ms.
- *     200 ms and 500 ms removed (Shelly meter updates at ~1 Hz, Req 21).
+ *  4. GET /api/live  — adds "ota_active" boolean so the home page can
+ *     display an "Update in progress" banner during flash.
+ *     API_BUFFER_SIZE 320 in Config.h remains sufficient
+ *     (worst-case JSON is ~146 chars — no Config.h change needed).
  *
- *  5. PAGE_INDEX, PAGE_SETTINGS  — label "cos φ" → "pf_apparent".
- *     Settings rate buttons updated to match new whitelist.
+ *  5. Home page (PAGE_INDEX) — OTA button added to the button grid,
+ *     "ota_active" banner shown/hidden by the existing refresh() loop.
  *
- *  6. PAGE_README  — updated to describe Shelly architecture.
+ *  6. README page (PAGE_README) — OTA section added to the page table.
  *
- *  Everything else — HTML structure, captive portal, download, reset,
- *  live plot, mDNS, DNS catch-all, all other routes — is UNCHANGED.
+ *  Everything else — all other pages, routes, handlers, Wi-Fi setup,
+ *  captive portal, Shelly push, settings, SD download/reset — UNCHANGED.
  */
 
 #include "WebPortal.h"
@@ -58,10 +62,16 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
                  border-radius: 3px; margin-right: .3em; }
   .ok  { background: #cfc; color: #060; }
   .err { background: #fcc; color: #800; }
+  .banner { display: none; background: #fff3cd; color: #856404;
+            border: 1px solid #ffc107; border-radius: 6px;
+            padding: .7em 1em; margin-bottom: 1em;
+            font-weight: bold; text-align: center; }
 </style>
 </head><body>
 
 <h1>BRAUN Shelly Power Logger</h1>
+
+<div id="ota-banner" class="banner">⬆ Firmware-Update läuft — bitte warten…</div>
 
 <div class="card">
   <div class="label">Aktuelle Werte</div>
@@ -87,6 +97,7 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
     <button class="danger" onclick="confirmReset()">Reset &amp; Delete SD</button>
     <button class="muted" onclick="location.href='/settings'">Settings</button>
     <button class="muted" onclick="location.href='/readme'">Read Me</button>
+    <button class="muted" onclick="location.href='/update'">⬆ Firmware Update</button>
   </div>
 </div>
 
@@ -116,6 +127,8 @@ async function refresh() {
     const sd = document.getElementById('sd-status');
     sd.textContent = d.sd_ok ? 'OK' : 'FEHLER';
     sd.className   = d.sd_ok   ? 'ok' : 'err';
+    document.getElementById('ota-banner').style.display =
+      d.ota_active ? 'block' : 'none';
   } catch (e) {
     document.getElementById('power').textContent   = '—';
     document.getElementById('voltage').textContent = '—';
@@ -518,6 +531,15 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
       Changes take effect immediately but are lost on reboot.
     </td>
   </tr>
+  <tr>
+    <td><strong>Firmware Update</strong><br><code>/update</code></td>
+    <td>Over-the-air firmware update. Select a compiled <code>.bin</code> file
+        (from Arduino IDE: <em>Sketch → Export Compiled Binary</em>), then click
+        Upload. A progress bar shows transfer progress. The ESP32 reboots
+        automatically on success — the page will redirect to <code>/</code>
+        after 8 seconds. The SD log is flushed before flashing so no data is
+        lost. Logging resumes automatically after reboot.</td>
+  </tr>
 </table>
 
 <h2>Log file format</h2>
@@ -757,6 +779,156 @@ init();
 )HTML";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PAGE_OTA  — firmware upload form
+// Accepts a single .bin file via multipart POST to /update.
+// Progress bar driven by XMLHttpRequest upload events (avoids fetch() which
+// gives no progress on most mobile browsers).
+// On success the page auto-redirects to / after 8 s (long enough for reboot).
+// On error it shows the server's error text and offers a retry link.
+// ─────────────────────────────────────────────────────────────────────────────
+static const char PAGE_OTA[] PROGMEM = R"HTML(
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Firmware Update – Shelly Logger</title>
+<style>
+  body { font-family: sans-serif; max-width: 560px; margin: 2em auto;
+         padding: 1em; background: #f5f5f5; color: #222; }
+  h1   { color: #000; font-size: 1.4em; margin-bottom: 0.3em; }
+  .card { background: white; border-radius: 8px; padding: 1.4em;
+          margin-bottom: 1em; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  label  { display: block; font-weight: bold; margin-bottom: .5em; color: #444; }
+  input[type=file] { width: 100%; padding: .5em 0; font-size: 1em;
+                     margin-bottom: 1em; }
+  button { padding: .85em 1.8em; font-size: 1em; border: none;
+           border-radius: 6px; background: #007acc; color: white;
+           cursor: pointer; }
+  button:hover    { background: #005f99; }
+  button:disabled { background: #aaa; cursor: default; }
+  .progress-wrap { background: #e0e0e0; border-radius: 4px;
+                   height: 22px; margin: 1em 0; overflow: hidden;
+                   display: none; }
+  .progress-bar  { height: 100%; width: 0%; background: #28a745;
+                   transition: width .15s ease; text-align: center;
+                   color: white; font-size: .85em; line-height: 22px; }
+  .msg { margin-top: 1em; padding: .6em .9em; border-radius: 5px;
+         font-size: .95em; display: none; }
+  .msg.ok  { background: #d4edda; color: #155724; display: block; }
+  .msg.err { background: #f8d7da; color: #721c24; display: block; }
+  .note { font-size: .85em; color: #888; margin-top: .8em; }
+  a.back { display: inline-block; margin-top: .8em; color: #007acc;
+           text-decoration: none; }
+  a.back:hover { text-decoration: underline; }
+</style>
+</head><body>
+
+<h1>Firmware Update</h1>
+
+<div class="card">
+  <label for="binfile">Select compiled firmware (.bin)</label>
+  <input type="file" id="binfile" accept=".bin">
+
+  <button id="upload-btn" onclick="startUpload()">Upload &amp; Flash</button>
+
+  <div class="progress-wrap" id="prog-wrap">
+    <div class="progress-bar" id="prog-bar">0%</div>
+  </div>
+
+  <div class="msg" id="msg"></div>
+
+  <p class="note">
+    Export the binary from Arduino IDE via
+    <em>Sketch → Export Compiled Binary</em>, then select the
+    <code>*.bin</code> (not <code>*.elf</code>) file above.<br>
+    The device will reboot automatically after a successful flash.
+    Logging resumes on its own — no further action needed.
+  </p>
+</div>
+
+<a class="back" href="/">← Back to home</a>
+
+<script>
+function startUpload() {
+  const fileInput = document.getElementById('binfile');
+  if (!fileInput.files.length) {
+    showMsg('Please select a .bin file first.', 'err');
+    return;
+  }
+  const file = fileInput.files[0];
+  if (!file.name.endsWith('.bin')) {
+    showMsg('File must have a .bin extension.', 'err');
+    return;
+  }
+
+  const btn      = document.getElementById('upload-btn');
+  const progWrap = document.getElementById('prog-wrap');
+  const progBar  = document.getElementById('prog-bar');
+
+  btn.disabled        = true;
+  progWrap.style.display = 'block';
+  hideMsg();
+
+  const formData = new FormData();
+  formData.append('firmware', file, file.name);
+
+  const xhr = new XMLHttpRequest();
+
+  // ── Progress ──────────────────────────────────────────────────────────────
+  xhr.upload.onprogress = function(e) {
+    if (!e.lengthComputable) return;
+    const pct = Math.round((e.loaded / e.total) * 100);
+    progBar.style.width  = pct + '%';
+    progBar.textContent  = pct + '%';
+  };
+
+  // ── Done ──────────────────────────────────────────────────────────────────
+  xhr.onload = function() {
+    if (xhr.status === 200) {
+      progBar.style.width  = '100%';
+      progBar.style.background = '#28a745';
+      progBar.textContent  = '100%';
+      showMsg('✓ Flash successful — device is rebooting. ' +
+              'Redirecting to home in 8 s…', 'ok');
+      setTimeout(function() { location.href = '/'; }, 8000);
+    } else {
+      showMsg('✗ Upload failed (HTTP ' + xhr.status + '): ' +
+              xhr.responseText, 'err');
+      btn.disabled = false;
+    }
+  };
+
+  // ── Network error ─────────────────────────────────────────────────────────
+  // A network error here is actually EXPECTED on success: the ESP32 reboots
+  // mid-response.  If we already showed the 100% bar, treat it as success.
+  xhr.onerror = function() {
+    if (progBar.textContent === '100%') {
+      showMsg('✓ Flash likely successful — device rebooting. ' +
+              'Redirecting to home in 8 s…', 'ok');
+      setTimeout(function() { location.href = '/'; }, 8000);
+    } else {
+      showMsg('✗ Network error — check device and try again.', 'err');
+      btn.disabled = false;
+    }
+  };
+
+  xhr.open('POST', '/update');
+  xhr.send(formData);
+}
+
+function showMsg(text, cls) {
+  const el = document.getElementById('msg');
+  el.textContent = text;
+  el.className   = 'msg ' + cls;
+}
+function hideMsg() {
+  const el = document.getElementById('msg');
+  el.className = 'msg';
+}
+</script>
+</body></html>
+)HTML";
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -804,7 +976,13 @@ bool WebPortal::begin() {
   _server.on("/api/live",            HTTP_GET,  [this](){ handleApiLive(); });
   _server.on("/api/settings",        HTTP_GET,  [this](){ handleApiSettings(); });
   _server.on("/api/settings",        HTTP_POST, [this](){ handleApiSettingsSave(); });
-  _server.on("/api/shelly_push",     HTTP_POST, [this](){ handleShellyPush(); });   // NEW
+  _server.on("/api/shelly_push",     HTTP_POST, [this](){ handleShellyPush(); });   // v6
+  _server.on("/update",              HTTP_GET,  [this](){ handleOtaForm(); });      // v7
+  // POST /update: the body handler sends the final HTTP response;
+  // the upload (chunk) handler is registered separately via onFileUpload.
+  _server.on("/update",              HTTP_POST,
+    [this](){ handleOtaUpload(); },
+    [this](){ handleOtaChunk(); });
   _server.on("/download",            HTTP_GET,  [this](){ handleDownload(); });
   _server.on("/reset",               HTTP_POST, [this](){ handleReset(); });
   _server.on("/settings",            HTTP_GET,  [this](){ handleSettings(); });
@@ -850,7 +1028,7 @@ void WebPortal::handleShellyPush() {
   }
 }
 
-// ── /api/live — now includes shelly_ok ───────────────────────────────────
+// ── /api/live — includes shelly_ok (v6) and ota_active (v7) ─────────────
 void WebPortal::handleApiLive() {
   char buf[API_BUFFER_SIZE];
   float p  = _logger.getLastPower();
@@ -858,9 +1036,9 @@ void WebPortal::handleApiLive() {
   float pf = _logger.getLastPf();
 
   // Build only the sensor part conditionally. The status fields
-  // (buffer/dropped/uptime/shelly_ok/sd_ok) are identical in both cases,
-  // so they are formatted exactly once below — adding a new status field
-  // now means editing one place, not two.
+  // (buffer/dropped/uptime/shelly_ok/sd_ok/ota_active) are identical in
+  // both cases, so they are formatted exactly once below — adding a new
+  // status field means editing one place, not two.
   char sensor[72];
   if (isnan(p) || isnan(v) || isnan(pf)) {
     snprintf(sensor, sizeof(sensor),
@@ -872,13 +1050,14 @@ void WebPortal::handleApiLive() {
 
   snprintf(buf, sizeof(buf),
     "{%s,\"buffer\":%u,\"dropped\":%lu,\"uptime\":%lu,"
-    "\"shelly_ok\":%s,\"sd_ok\":%s}",
+    "\"shelly_ok\":%s,\"sd_ok\":%s,\"ota_active\":%s}",
     sensor,
     (unsigned)_logger.getBufferCount(),
     (unsigned long)_logger.getDroppedSamples(),
     (unsigned long)(millis() / 1000),
-    _logger.shellyOk() ? "true" : "false",
-    _logger.sdOk()     ? "true" : "false");
+    _logger.shellyOk()      ? "true" : "false",
+    _logger.sdOk()          ? "true" : "false",
+    _logger.isOtaInProgress() ? "true" : "false");
 
   _server.send(200, "application/json", buf);
 }
@@ -962,6 +1141,102 @@ void WebPortal::handleApiSettingsSave() {
 
 void WebPortal::handleReadme() {
   _server.send_P(200, "text/html", PAGE_README);
+}
+
+// ── GET /update — serve the OTA upload form ───────────────────────────────
+void WebPortal::handleOtaForm() {
+  _server.send_P(200, "text/html", PAGE_OTA);
+}
+
+// ── POST /update body handler — sends the final HTTP response ────────────
+//
+// WebServer calls this AFTER the last handleOtaChunk() invocation.
+// Update.end() has already been called inside the chunk handler, so here
+// we only check Update.hasError() and send the appropriate response.
+//
+// If the flash succeeded the ESP32 reboots inside ESP.restart() below;
+// the HTTP response may or may not reach the browser before the reboot —
+// PAGE_OTA handles both outcomes (the xhr.onerror path on the JS side).
+void WebPortal::handleOtaUpload() {
+  if (Update.hasError()) {
+    // Restore logging so the device stays usable after a failed update.
+    _logger.setOtaInProgress(false);
+    String err = Update.errorString();
+    Serial.printf("[OTA] Fehlgeschlagen: %s\n", err.c_str());
+    _server.send(500, "text/plain", "OTA fehlgeschlagen: " + err);
+  } else {
+    // Success path — send 200 then reboot.
+    // The response may be cut off mid-TCP by the reboot; PAGE_OTA JS
+    // handles the resulting xhr.onerror as a successful outcome.
+    _server.send(200, "text/plain", "OK");
+    delay(200);   // give TCP stack a moment to flush
+    Serial.println("[OTA] Erfolgreich — Neustart...");
+    ESP.restart();
+  }
+}
+
+// ── Upload chunk callback — called by WebServer for every multipart chunk ─
+//
+// Execution context: synchronous inside _server.handleClient(), same task
+// as loop().  No RTOS or ISR concerns.
+//
+// HTTPUpload fields used:
+//   status   — UPLOAD_FILE_START / UPLOAD_FILE_WRITE / UPLOAD_FILE_END / UPLOAD_FILE_ABORTED
+//   buf      — pointer to this chunk's data
+//   currentSize — number of valid bytes in buf this call
+//   totalSize   — total bytes received so far (increases each WRITE call)
+void WebPortal::handleOtaChunk() {
+  HTTPUpload& upload = _server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("[OTA] Start: %s  (%u Bytes erwartet)\n",
+                  upload.filename.c_str(), upload.totalSize);
+
+    // Pause logging and flush SD before touching flash.
+    // setOtaInProgress(true) calls flushToSD() internally.
+    _logger.setOtaInProgress(true);
+
+    // UPDATE_SIZE_UNKNOWN lets the Update library allocate flash
+    // dynamically.  Passing the actual file size is also valid if known,
+    // but the browser does not always send Content-Length reliably in
+    // multipart uploads over the ESP32 WebServer.
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Serial.printf("[OTA] Update.begin() fehlgeschlagen: %s\n",
+                    Update.errorString());
+      // Do NOT abort here — let handleOtaUpload() send the error response
+      // so the HTTP transaction completes cleanly.
+    }
+
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    // Feed this chunk to the flash writer.
+    // Update.write() returns the number of bytes actually written;
+    // a mismatch means flash is full or the image is corrupt.
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Serial.printf("[OTA] Update.write() Fehler bei Byte %u: %s\n",
+                    upload.totalSize, Update.errorString());
+    } else {
+      // Print a progress dot every ~16 KB to Serial without flooding it.
+      if ((upload.totalSize / upload.currentSize) % 64 == 0) {
+        Serial.print('.');
+      }
+    }
+
+  } else if (upload.status == UPLOAD_FILE_END) {
+    Serial.printf("\n[OTA] Übertragen: %u Bytes — finalisiere...\n",
+                  upload.totalSize);
+    // Finalise: verify the flash and mark the new partition as bootable.
+    // Passing 'true' triggers MD5 verification if the image contains a hash.
+    if (!Update.end(true)) {
+      Serial.printf("[OTA] Update.end() fehlgeschlagen: %s\n",
+                    Update.errorString());
+    }
+
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    // Client disconnected mid-upload.
+    Update.abort();
+    _logger.setOtaInProgress(false);
+    Serial.println("[OTA] Upload abgebrochen — Logging wiederhergestellt");
+  }
 }
 
 void WebPortal::handleNotFound() {
