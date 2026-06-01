@@ -1,25 +1,51 @@
 /*
- * Logger.h v5  (Shelly + ESP32)
- * ==============================
+ * Logger.h v6  (Shelly + ESP32 + OTA-aware)
+ * ==========================================
  *
- * Changes vs. v4 (PZEM/ESP32)
- * ----------------------------
- *   REMOVED  #include <PZEM004Tv30.h>
- *   REMOVED  PZEM004Tv30 _pzem member, constructor init, UART2 usage
- *   REMOVED  _pzemErrorCount (replaced by ShellyClient::shellyOk())
- *   ADDED    ShellyClient& _shelly reference (injected by main .ino)
- *   CHANGED  pollIfDue()  — reads from _shelly instead of _pzem.*
- *   CHANGED  pzemOk()     — renamed to shellyOk(), delegates to _shelly
- *   CHANGED  ok()         — now checks shellyOk() && _sdOk
- *   CHANGED  constructor  — takes ShellyClient& parameter
- *   CHANGED  _pollIntervalMs default: 500 → 1000 ms
- *   UNCHANGED: flushToSD(), resetSDFile(), pushSample(), tryRecoverSD(),
- *              initSDCard(), all getter methods, RAM buffer logic,
- *              SD FIFO-drop on overflow, SD retry every 30 s.
+ * Changes vs. v5
+ * --------------
+ *   ADDED  _otaInProgress flag (bool, default false)
+ *   ADDED  setOtaInProgress(bool)  — called by WebPortal OTA handlers
+ *   ADDED  isOtaInProgress()       — read by WebPortal for /api/live response
+ *   CHANGED pollIfDue()   — returns immediately when OTA is active
+ *   CHANGED flushIfDue()  — returns immediately when OTA is active;
+ *                           flushes RAM buffer to SD BEFORE yielding to OTA
+ *                           (called explicitly by WebPortal before Update.begin())
+ *   UNCHANGED: everything else — ShellyClient, SD logic, RAM buffer,
+ *              FIFO-drop, SD recovery, all getters, Sample struct.
+ *
+ * OTA DESIGN RATIONALE
+ * --------------------
+ * OTA is handled entirely in WebPortal (POST /update route, Update.h).
+ * Logger.h does NOT own or include Update.h — that would violate the
+ * single-responsibility split that makes this codebase testable.
+ *
+ * What Logger.h DOES contribute:
+ *
+ *   1. PAUSE during flash  — pollIfDue() and flushIfDue() are no-ops while
+ *      _otaInProgress is true.  This prevents:
+ *        • a concurrent SD write from corrupting the filesystem mid-flash
+ *          (SD.open / SD.close share the same SPI bus; Update.h uses flash,
+ *           not SPI, but the loop() timing jitter could still interleave)
+ *        • misleading NAN values being cached while the Shelly watchdog trips
+ *          (it will trip — that is expected and cosmetic; see note below)
+ *
+ *   2. PRE-FLUSH before flash — WebPortal calls flushToSD() explicitly just
+ *      before calling Update.begin().  This ensures no logged samples are
+ *      lost when the ESP32 reboots at the end of the update.
+ *      flushToSD() is already public and unchanged.
+ *
+ * WATCHDOG NOTE
+ * -------------
+ * The Shelly push watchdog (SHELLY_ERROR_THRESHOLD × INTERVAL_SHELLY_POLL_MS
+ * = 3 s) WILL trip during a firmware upload (typically 5–15 s for a 1 MB
+ * binary over Wi-Fi at ~1 Mbps).  The LED will blink at 5 Hz.
+ * This is expected behaviour and resets automatically when the device
+ * reboots and the Shelly resumes pushing.  No user action required.
  *
  * The Sample struct field "pf" is kept as-is in RAM.
  * The CSV header uses "pf_apparent" (Config.h LOG_FILE_HEADER).
- * No struct change is needed — the field stores whatever the caller puts  in it.
+ * No struct change is needed — the field stores whatever the caller puts in it.
  */
 
 #ifndef LOGGER_H
@@ -54,6 +80,7 @@ public:
       _lastPower(NAN),
       _lastPf(NAN),
       _sdOk(false),
+      _otaInProgress(false),
       _pollIntervalMs(INTERVAL_SHELLY_POLL_MS),   // 1000 ms default
       _powerThresholdW(DEFAULT_POWER_THRESHOLD_W)
   {}
@@ -72,6 +99,31 @@ public:
   void  setPowerThreshold(float watts)  { _powerThresholdW = watts; }
   float getPowerThreshold()   const     { return _powerThresholdW; }
 
+  // ── OTA gate — called by WebPortal OTA handlers ───────────────────────────
+  //
+  // setOtaInProgress(true)  is called by WebPortal just before Update.begin().
+  //   At that point WebPortal MUST also call flushToSD() explicitly so that
+  //   any buffered samples are persisted before the reboot that follows.
+  //
+  // setOtaInProgress(false) is never called in normal flow because the ESP32
+  //   reboots at the end of a successful OTA.  It exists so that WebPortal
+  //   can clear the flag on a failed/aborted update, restoring normal logging.
+  void setOtaInProgress(bool active) {
+    if (active && !_otaInProgress) {
+      // Flush whatever is in RAM before handing over to the OTA writer.
+      // This is a best-effort call — if SD is unavailable the samples are
+      // lost, but that is preferable to leaving the SD file in a torn state.
+      flushToSD();
+      Serial.println("[Logger] OTA gestartet — Logging pausiert");
+    }
+    if (!active && _otaInProgress) {
+      Serial.println("[Logger] OTA abgebrochen — Logging wiederhergestellt");
+    }
+    _otaInProgress = active;
+  }
+
+  bool isOtaInProgress() const { return _otaInProgress; }
+
   // ── Called from loop() every iteration ───────────────────────────────────
   //
   // pollIfDue() used to call _pzem.voltage() etc. synchronously.
@@ -80,6 +132,10 @@ public:
   // ring-buffer more often than _pollIntervalMs even if the Shelly pushes
   // faster (it shouldn't, but belt-and-suspenders).
   void pollIfDue() {
+    // Suspend all sampling while a firmware update is being written.
+    // The Shelly watchdog will trip (expected — see header note).
+    if (_otaInProgress) return;
+
     uint32_t now = millis();
     if (now - _lastPollMs < _pollIntervalMs) return;
     _lastPollMs = now;
@@ -111,6 +167,10 @@ public:
 
   // ── SD flush on schedule (unchanged from v4) ─────────────────────────────
   void flushIfDue() {
+    // Do not touch the SD card while OTA is writing flash.
+    // setOtaInProgress(true) already flushed the buffer synchronously.
+    if (_otaInProgress) return;
+
     uint32_t now = millis();
     if (now - _lastFlushMs < INTERVAL_SD_FLUSH_MS) return;
     _lastFlushMs = now;
@@ -195,6 +255,7 @@ private:
   float         _lastPower;
   float         _lastPf;
   bool          _sdOk;
+  bool          _otaInProgress;   // true while WebPortal is writing OTA flash
   uint32_t      _pollIntervalMs;
   float         _powerThresholdW;
 
