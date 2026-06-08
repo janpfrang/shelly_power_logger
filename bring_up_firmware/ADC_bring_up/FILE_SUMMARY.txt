@@ -1,0 +1,294 @@
+# ADC Bringup Toolkit — File Summary
+
+## 📦 Package Contents
+
+This toolkit provides a complete workflow for commissioning the 9V supply voltage monitoring system (Requirement 13) on the Shelly ESP32 Logger.
+
+### 1. **ADC_Bringup.ino** (Main Firmware)
+**Type:** Arduino sketch for ESP32  
+**Size:** ~5 KB compiled  
+**Purpose:** Minimal bring-up firmware for characterizing the ADC and voltage divider
+
+**Features:**
+- Continuous ADC sampling of GPIO 35 (PIN_VSUPPLY)
+- Configurable voltage divider ratio (VDIV_RATIO)
+- WiFi enabled for realistic current draw simulation
+- Web endpoint `/adc` for remote monitoring
+- Serial output with ADC counts, calculated voltage, and status
+- Mains loss threshold detection
+
+**OTA Compatible:** Yes ✓  
+Can be flashed via `http://braun_PZEM.local/update` to replace main logger
+
+**Key Parameters (Config):**
+```cpp
+#define VDIV_RATIO               3.0f       // Adjust after initial measurement
+#define SHUTDOWN_THRESHOLD_V     5.5f       // Brownout threshold
+#define ADC_SAMPLES              16         // Noise reduction via oversampling
+```
+
+---
+
+### 2. **ADC_Calibration_Guide.md** (Documentation)
+**Type:** Markdown guide  
+**Length:** ~2000 words  
+**Purpose:** Step-by-step calibration instructions with hardware setup diagrams
+
+**Sections:**
+- Hardware setup (voltage divider examples: 10kΩ + 30kΩ)
+- Flashing instructions (Arduino IDE + OTA methods)
+- Calibration procedure (5 steps)
+- Threshold tuning for brownout detection
+- Web interface & JSON API reference
+- Debugging troubleshooting
+- Integration with main firmware
+
+**For:** Engineers and technicians commissioning hardware
+
+---
+
+### 3. **adc_analysis.py** (Python Analysis Tool)
+**Type:** Python 3 utility script  
+**Dependencies:** matplotlib (optional, for plots)  
+**Purpose:** Parse serial logs and calculate optimal VDIV_RATIO automatically
+
+**Features:**
+- Parse serial output from ADC_Bringup.ino
+- Extract ADC counts and calculated voltages
+- Compute statistics (min, max, mean, std dev)
+- Automatic VDIV_RATIO calculation from multimeter reading
+- Generate calibration plots (PNG)
+- Recalculate voltages with different ratios
+
+**Usage:**
+```bash
+# Basic analysis
+python3 adc_analysis.py --serial-log output.txt
+
+# With multimeter calibration
+python3 adc_analysis.py --serial-log output.txt --multimeter 8.95
+
+# Generate plot
+python3 adc_analysis.py --serial-log output.txt --multimeter 8.95 --plot
+```
+
+**For:** Data analysis and validation of measurements
+
+---
+
+### 4. **Logger_ADC_Integration.h** (Integration Template)
+**Type:** C++ code template / documentation  
+**Size:** ~200 lines (well-commented)  
+**Purpose:** Template showing how to integrate calibrated ADC into main Logger.h
+
+**Contents:**
+- `adcToVoltage()` – ADC count to voltage conversion function
+- `checkMainsVoltage()` – Mains loss detection & flush logic
+- Member variables needed in Logger class
+- Constructor initialization additions
+- Integration points in main loop()
+- Testing checklist
+
+**Usage:**
+1. Run ADC_Bringup.ino and calibrate (get VDIV_RATIO)
+2. Copy functions from this template into Logger.h
+3. Add constants to Config.h
+4. Call `logger.checkMainsVoltage()` from main loop()
+5. Re-flash main firmware
+
+**For:** Firmware developers integrating ADC monitoring into production code
+
+---
+
+### 5. **README_ADC_Bringup.md** (Master Guide)
+**Type:** Comprehensive guide  
+**Length:** ~1500 words  
+**Purpose:** Master document tying all components together
+
+**Contents:**
+- Quick start (5 minutes)
+- Hardware setup diagrams
+- Typical ADC values lookup table
+- Detailed workflow diagrams (4 phases)
+- Python tool usage examples
+- Configuration reference
+- Troubleshooting guide
+- Requirements mapping
+
+**For:** Project overview and decision-making
+
+---
+
+## 🔄 Typical Workflow
+
+```
+┌─────────────────────────────────────────────────────┐
+│ PHASE 1: Setup                                      │
+│  1. Read README_ADC_Bringup.md (5 min)             │
+│  2. Compile ADC_Bringup.ino in Arduino IDE         │
+│  3. Flash to ESP32 (USB or OTA)                    │
+└────────────┬────────────────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────────────────┐
+│ PHASE 2: Characterization (follow ADC_Calibration  │
+│  1. Monitor serial output (60 seconds of readings) │
+│  2. Measure actual voltage with multimeter         │
+│  3. Calculate VDIV_RATIO = actual / measured       │
+│  4. Update code and re-flash                       │
+│  5. Verify new reading matches multimeter          │
+└────────────┬────────────────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────────────────┐
+│ PHASE 3: Validation (use adc_analysis.py)         │
+│  1. Capture 5+ minutes of serial output to file    │
+│  2. python3 adc_analysis.py --serial-log <file>   │
+│  3. python3 adc_analysis.py ... --multimeter 8.95  │
+│  4. Review statistics and generated plots          │
+└────────────┬────────────────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────────────────┐
+│ PHASE 4: Integration (use Logger_ADC_Integration)  │
+│  1. Copy adcToVoltage() into Logger.h              │
+│  2. Copy checkMainsVoltage() into Logger.h         │
+│  3. Add constants to Config.h                      │
+│  4. Call checkMainsVoltage() from loop()           │
+│  5. Compile and flash main firmware via OTA        │
+│  6. Test: voltage drop triggers flush & LED blink  │
+└─────────────────────────────────────────────────────┘
+```
+
+**Estimated Time:** 30–60 minutes (including testing and validation)
+
+---
+
+## 📋 Requirements Mapping
+
+| Req ID | Title | Status | File |
+|--------|-------|--------|------|
+| 13 | Supply voltage monitoring | ✅ Implemented | ADC_Bringup.ino |
+| 13a | Mains loss detection | ✅ Supported | Logger_ADC_Integration.h |
+| 13b | Safe flush before shutdown | ✅ Template | Logger_ADC_Integration.h |
+
+---
+
+## 🛠️ Getting Started
+
+### For Commissioning Engineers:
+
+1. **Start here:** README_ADC_Bringup.md (5 min read)
+2. **Follow:** ADC_Calibration_Guide.md (step-by-step)
+3. **Flash:** ADC_Bringup.ino via Arduino IDE or OTA
+4. **Measure:** Multimeter + serial monitor
+5. **Analyze:** `adc_analysis.py --serial-log output.txt --multimeter 8.95`
+
+### For Firmware Developers:
+
+1. **Review:** Logger_ADC_Integration.h
+2. **Extract:** adcToVoltage() and checkMainsVoltage()
+3. **Integrate:** Add to Logger.h and main loop()
+4. **Update:** Config.h with calibrated VDIV_RATIO
+5. **Test:** Run main firmware + validate brownout detection
+
+### For Project Managers:
+
+- **Effort:** 1–2 hours per hardware variant
+- **Cost:** Zero (existing ESP32 + resistor divider)
+- **Risk:** Low (diagnostic firmware, easy rollback)
+- **Requirement Met:** Req 13 (Supply Monitoring)
+
+---
+
+## 🔧 File Dependencies
+
+```
+ADC_Bringup.ino
+  ├── Requires: Arduino IDE + esp32 board package
+  ├── Uses: <Arduino.h>, <WiFi.h>, <WebServer.h>
+  └── Config: Define VDIV_RATIO before first use
+
+ADC_Calibration_Guide.md
+  ├── References: ADC_Bringup.ino
+  ├── References: adc_analysis.py
+  └── Standalone documentation (no code)
+
+adc_analysis.py
+  ├── Input: Serial log file from ADC_Bringup.ino
+  ├── Output: Statistics, VDIV_RATIO, optional plot (PNG)
+  └── Dependencies: matplotlib (optional)
+
+Logger_ADC_Integration.h
+  ├── Requires: Logger.h + Config.h from main project
+  ├── Provides: Code template, not compilable standalone
+  └── Used by: Firmware developers integrating into production
+
+README_ADC_Bringup.md
+  ├── References: All other files
+  ├── Purpose: Navigation and overview
+  └── Standalone documentation (no code)
+```
+
+---
+
+## 💾 File Locations
+
+All files are in `/home/claude/`:
+
+```
+/home/claude/
+├── ADC_Bringup.ino                    (Main firmware - flashable)
+├── ADC_Calibration_Guide.md           (Step-by-step guide)
+├── adc_analysis.py                    (Python analysis tool)
+├── Logger_ADC_Integration.h           (Integration template)
+├── README_ADC_Bringup.md              (Master overview)
+└── FILE_SUMMARY.txt                   (This file)
+```
+
+**Download:** Copy these files to your development machine:
+```bash
+# On your machine:
+scp user@server:/home/claude/ADC_*.* .
+scp user@server:/home/claude/Logger_ADC_Integration.h .
+scp user@server:/home/claude/README_ADC_Bringup.md .
+scp user@server:/home/claude/adc_analysis.py .
+```
+
+---
+
+## ✅ Pre-Flight Checklist
+
+Before starting commissioning:
+
+- [ ] ADC_Bringup.ino available
+- [ ] Arduino IDE installed (≥1.8) + esp32 board package
+- [ ] Multimeter available
+- [ ] USB cable for ESP32 or network access for OTA
+- [ ] Python 3.6+ available (for analysis)
+- [ ] matplotlib installed: `pip install matplotlib` (optional)
+- [ ] Serial terminal / monitor available (PuTTY, Arduino IDE monitor, etc.)
+- [ ] Voltage divider hardware verified (10kΩ + 30kΩ resistors measured)
+
+---
+
+## 📞 Support
+
+If issues arise:
+
+1. **Flashing fails:** See ADC_Calibration_Guide.md "Debugging" section
+2. **Voltage wrong:** Check "Troubleshooting" in README_ADC_Bringup.md
+3. **Python errors:** Verify `python3 --version` and `pip install -r requirements.txt`
+4. **Integration question:** Review Logger_ADC_Integration.h comments and examples
+
+---
+
+## 📝 Version History
+
+| Date | Version | Status | Notes |
+|------|---------|--------|-------|
+| 2026-06-08 | 1.0 | ✅ Release | Initial toolkit for Req 13 implementation |
+
+---
+
+**Ready to commission your supply monitoring system!** 🚀
