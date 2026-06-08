@@ -1,10 +1,15 @@
 /*
- * Config.h - Zentrale Konfiguration v6  (Shelly + ESP32 + OTA)
- * =============================================================
+ * Config.h - Zentrale Konfiguration v7  (Shelly + ESP32 + OTA + Power-loss)
+ * =========================================================================
  *
- * Changes vs. v5 (Shelly + ESP32):
- *   ADDED    OTA_ENDPOINT  -- route WebPortal listens on for firmware upload
- *   CHANGED  API_BUFFER_SIZE comment  (ota_active field added to /api/live)
+ * Changes vs. v6 (Shelly + ESP32 + OTA):
+ *   ADDED    "Versorgungs-Ueberwachung" section (Req 13):
+ *              DIVIDER_R_TOP_OHM / DIVIDER_R_BOTTOM_OHM   (180k / 47k on 9V rail)
+ *              POWER_THRESHOLD_LOW_MV  (7350) / POWER_THRESHOLD_HIGH_MV (7750)
+ *              POWER_STARTUP_GRACE_MS, POWER_CHECK_INTERVAL_MS,
+ *              POWER_ADC_SAMPLES, POWER_ADC_SAMPLE_GAP_US,
+ *              POWER_MAJORITY_COUNT, POWER_RECOVER_COUNT
+ *   CHANGED  PIN_VSUPPLY comment -- the pin is now actively read by PowerMonitor
  *   ALL other constants unchanged
  */
 
@@ -18,7 +23,7 @@
 #define PIN_SD_CLK      27
 #define PIN_SD_MISO     26
 #define PIN_LED         32
-#define PIN_VSUPPLY     35   // ADC -- supply monitoring (future, Req 13)
+#define PIN_VSUPPLY     35   // ADC1_CH7 -- 9V-rail monitor for power-loss flush (Req 13)
 // GPIO 33 is reserved for a future manual-reset button (Req 25/26).
 // It is intentionally NOT defined here: defining a pin that no code reads
 // is dead code. Add the #define together with the handler that uses it.
@@ -56,6 +61,36 @@
 #define INTERVAL_SD_FLUSH_MS     10000   // flush RAM buffer to SD every 10 s (unchanged)
 #define INTERVAL_LED_OK_MS         500   // 1 Hz blink when system OK  (unchanged)
 #define INTERVAL_LED_ERR_MS        100   // 5 Hz blink on error        (unchanged)
+
+// ===== Versorgungs-Ueberwachung / Power-loss detection (Req 13) =====
+// GPIO 35 (PIN_VSUPPLY) reads the 9 V rail through a resistor divider:
+//
+//     9V rail --[ R_TOP 180k ]--+--[ R_BOTTOM 47k ]-- GND
+//                               |
+//                            GPIO 35 (ADC1_CH7)
+//
+//   V_gpio = V_rail * R_BOTTOM / (R_TOP + R_BOTTOM) = V_rail * 0.2070
+//   PowerMonitor multiplies the measured pin voltage back up to recover the
+//   rail voltage, so the thresholds below are expressed in real 9V-rail mV.
+//
+// Why 7.35 V and not lower:
+//   The supply chain is 9V -> TSR-1-2450 (->5V) -> ESP32 LDO (->3.3V) -> ADC Vref.
+//   The TSR-1-2450 loses regulation at ~6.5 V input; below that the 3.3 V rail
+//   and the ADC reference sag, making readings untrustworthy.  Triggering at
+//   7.35 V keeps the worst-case ADC error window (~+/-0.3 V) ABOVE the 6.5 V
+//   regulator cliff, leaving a clean ~2.8 s window to flush the SD card.
+//   (Supercaps 2x1F series = 0.5 F; ~4.5 s from mains loss to 7.35 V at ~150 mA.)
+#define DIVIDER_R_TOP_OHM        180000UL  // R1: 9V rail -> GPIO35
+#define DIVIDER_R_BOTTOM_OHM      47000UL  // R2: GPIO35 -> GND
+
+#define POWER_THRESHOLD_LOW_MV     7350    // trigger shutdown below this (mV, 9V rail)
+#define POWER_THRESHOLD_HIGH_MV    7750    // hysteresis: clear / recover above this (mV)
+#define POWER_STARTUP_GRACE_MS     3000    // ignore readings while supercaps charge
+#define POWER_CHECK_INTERVAL_MS     200    // how often the rail is sampled
+#define POWER_ADC_SAMPLES            16    // oversampling count (noise ~ 1/sqrt(N))
+#define POWER_ADC_SAMPLE_GAP_US     200    // spacing between oversamples
+#define POWER_MAJORITY_COUNT          3    // consecutive low reads required to trigger
+#define POWER_RECOVER_COUNT          10    // consecutive OK reads during idle -> reboot
 
 // ===== Log-Bedingungen =====
 #define DEFAULT_POWER_THRESHOLD_W    0.0f   // 0 = log everything (no lower limit)
