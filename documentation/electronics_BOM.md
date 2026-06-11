@@ -27,14 +27,14 @@ BOM for improved functionalty including RTC and undervoltage protection and fuse
 | 9  |R_bal 100 kOhms       |     100 k ohms      |    conrad      |  x 003359192 VitrOhm POS100JT-52-100KAA POS100JT-52-100KAA Metallschicht-Widerstand 100 kΩ THT 0207 1 W 5 % 1 St. CE 003359192 Produkt-ID: 003359192 Menge: 4           |   2       |  0.28 €          | 
 | 10  |R1 180 kOhms       |           |          |             |   1       |                          | 
 | 11  |R2 47 kOhms       |           |          |             |   1       |                          | 
-| 12  |Diode 1N5822      | set of diods purchased (5x)      |          |             |   2       |              3.17 €           | 
+| 12  |D2, D2 Diode 1N5822      | set of diods purchased (5x)      |          |             |   2       |              3.17 €           | 
 | 13  |C1, C2       | Supercap 5.5V/0.47F           |         |   2           |   2       |             1.99 €            | 
-| 14  |R inrush limitier      | 10 Ω 2 W         |   ebay       |             |   1       |   1.00 €                      | 
+| 14  |R 3 10 Ω inrush limitier      | 10 Ω 2 W         |   ebay       |             |   1       |   1.00 €                      | 
 | 15  |U1 DC/DC converter       | 000156673 TracoPower TSR 1-2450 DC/DC-Wandler, Print 24 V/DC 5 V/DC 1 A 6 W Anzahl Ausgänge: 1 x Inhalt 1 St.CE 000156673 Produkt-ID: 000156673         |   Conrad       |     000156673        |   1       |  6.49 €                       | 
-| 16  |C 100µF elko power supply      |          |     |            |   1       |                       |
+| 16  |C3 100µF elko power supply      |          |     |            |   1       |                       |
 | 17  |Current limiting fuse 0.5A slow |  Feinsicherung 5x20mm, träge 0,5A        |    reichelt.de   |           Artikel-Nr.: TR 0,5A Hst.-Teile-Nr.: 522.514 |   1       |  0.48 €                     | 
 | 18  |fuse folder      |   Sicherungshalter, 5x20mm, print, mit Abdeckkappe       | reichelt.de      |    Artikel-Nr.: MTA 506000 / Hst.-Teile-Nr.: 506000        |   1       |  0.32 €                     | 
-| 19  |C 10 nF ceramic power supply     |          |       |            |          |                      |
+| 19  |C4 10 nF ceramic power supply     |          |       |            |          |                      |
 | 17  |empty on purpose      |          |       |            |   1       |  ?.?? €                     | 
 
 ---
