@@ -1,5 +1,5 @@
 /*
- * Config.h - Zentrale Konfiguration v8  (Shelly + ESP32 + OTA + Power-loss fix)
+ * Config.h - Zentrale Konfiguration v9  (Shelly + ESP32 + OTA + Power-loss + RTC)
  * ==============================================================================
  *
  * Changes vs. v7 (Shelly + ESP32 + OTA + Power-loss):
@@ -34,6 +34,14 @@
 // It is intentionally NOT defined here: defining a pin that no code reads
 // is dead code. Add the #define together with the handler that uses it.
 
+
+// ===== DS3231 RTC (I2C) =====
+// Hardware I2C bus 0 — dedicated SDA/SCL pins on ESP32-WROOM-32.
+// 4.7 kΩ pull-ups to 3.3 V recommended on both lines.
+// Do NOT connect VCC to 5 V.
+#define PIN_RTC_SDA     21   // I2C SDA (Wire default)
+#define PIN_RTC_SCL     22   // I2C SCL (Wire default)
+
 // ===== Shelly Plug S MTR Gen3 =====
 // The Shelly joins the ESP32 softAP as a STA client.
 // 192.168.4.1 is the fixed ESP32 AP gateway IP -- the Shelly always uses this
@@ -51,15 +59,17 @@
 
 // Shelly push watchdog: if no push is received for this many consecutive
 // expected intervals, the Shelly is declared unreachable (-> LED_ERROR).
-// 10 x 1000 ms = 10 s of silence before error is flagged.
-//
-// Why 10 and not 3:
-//   When the ESP32 boots after the Shelly, the softAP takes ~1-2 s to start.
-//   The Shelly then needs 3-10 s to re-associate its WiFi to the newly-appeared
-//   AP. With a 3 s threshold the watchdog tripped during that reconnection window
-//   and the UI stayed at '--' permanently. 10 s covers the worst-case
-//   re-association delay with margin, while still flagging a dead Shelly quickly.
-#define SHELLY_ERROR_THRESHOLD  10
+// 3 x 1000 ms = 3 s of silence before error is flagged during normal operation.
+#define SHELLY_ERROR_THRESHOLD   3
+
+// Startup grace for the Shelly watchdog (ms).
+// When the ESP32 boots after the Shelly is already running, the softAP takes
+// ~1-2 s to appear and the Shelly's WiFi client needs another 3-10 s to
+// re-associate. During that window no pushes arrive and the 3 s watchdog
+// would trip immediately. ShellyClient suppresses shellyOk()=false for this
+// many ms after the first-ever successful push, giving the link time to
+// stabilise without loosening the steady-state watchdog.
+#define SHELLY_STARTUP_GRACE_MS  15000
 
 // ===== Zeitintervalle (ms) =====
 // INTERVAL_SHELLY_POLL_MS is the EXPECTED push cadence from shelly_push.js.
@@ -133,7 +143,9 @@
 #define LOG_FILE_PATH    "/log.csv"
 // Column "pf" renamed to "pf_apparent" to reflect that it is a derived value
 // (apower / (V x I)), not a direct hardware measurement.  See Req 5 / Req 7c.
-#define LOG_FILE_HEADER  "time_ms,voltage_V,power_W,pf_apparent"
+// datetime column added (RTC); time_ms kept for backward compatibility and
+// cross-referencing with uptime-based debug prints.
+#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent"
 
 // ===== RAM-Puffer =====
 // 64 x 16 Byte = 1024 Byte.
