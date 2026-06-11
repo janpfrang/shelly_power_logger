@@ -148,7 +148,10 @@ function doPush() {
       url:     PUSH_URL,
       headers: {"Content-Type": "application/json"},
       body:    body,
-      timeout: 2   // seconds; must be < PUSH_INTERVAL_MS / 1000 to avoid queue build-up
+      timeout: 1   // seconds; MUST be < PUSH_INTERVAL_MS/1000 (1 s) so _pushPending
+                   // is always cleared before the next tick fires.
+                   // At 2 s the flag could stay set across a tick boundary during
+                   // ESP32 boot/reconnect, causing the watchdog to trip permanently.
     },
     function(result, error_code, error_msg) {
       _pushPending = false;
