@@ -1,15 +1,21 @@
 /*
- * Config.h - Zentrale Konfiguration v7  (Shelly + ESP32 + OTA + Power-loss)
- * =========================================================================
+ * Config.h - Zentrale Konfiguration v8  (Shelly + ESP32 + OTA + Power-loss fix)
+ * ==============================================================================
  *
- * Changes vs. v6 (Shelly + ESP32 + OTA):
- *   ADDED    "Versorgungs-Ueberwachung" section (Req 13):
- *              DIVIDER_R_TOP_OHM / DIVIDER_R_BOTTOM_OHM   (180k / 47k on 9V rail)
- *              POWER_THRESHOLD_LOW_MV  (7350) / POWER_THRESHOLD_HIGH_MV (7750)
- *              POWER_STARTUP_GRACE_MS, POWER_CHECK_INTERVAL_MS,
- *              POWER_ADC_SAMPLES, POWER_ADC_SAMPLE_GAP_US,
- *              POWER_MAJORITY_COUNT, POWER_RECOVER_COUNT
- *   CHANGED  PIN_VSUPPLY comment -- the pin is now actively read by PowerMonitor
+ * Changes vs. v7 (Shelly + ESP32 + OTA + Power-loss):
+ *   ADDED    POWER_MONITOR_ENABLED  -- set to 0 to disable the power-loss
+ *              watchdog entirely when the 9V/supercap circuit is not yet
+ *              populated.  This was the root cause of the WiFi-not-visible bug:
+ *              GPIO 35 floats to 0 V when the divider resistors are absent,
+ *              which reads as railMv = 0 -- below the 7350 mV threshold --
+ *              triggering handlePowerLoss() within ~600 ms of boot and
+ *              calling WiFi.mode(WIFI_OFF) before the AP was ever visible.
+ *   CHANGED  POWER_STARTUP_GRACE_MS  3000 -> 10000 ms
+ *              Even with the circuit populated the old 3 s grace was too short:
+ *              webPortal.begin() (WiFi.softAP) can take 200-500 ms, and the
+ *              first loop() iterations consumed the remaining grace window
+ *              before the AP was fully established.  10 s is safe for all
+ *              hardware states.
  *   ALL other constants unchanged
  */
 
@@ -83,9 +89,24 @@
 #define DIVIDER_R_TOP_OHM        180000UL  // R1: 9V rail -> GPIO35
 #define DIVIDER_R_BOTTOM_OHM      47000UL  // R2: GPIO35 -> GND
 
+// POWER_MONITOR_ENABLED
+// ---------------------
+// Set to 1 when the 9V rail + supercapacitor + resistor-divider circuit
+// is fully populated on the PCB.
+// Set to 0 (default) when the circuit is absent or not yet soldered:
+//   GPIO 35 floats / reads 0 V -> railMv = 0 -> always below 7350 mV ->
+//   handlePowerLoss() fires ~600 ms after boot -> WiFi.mode(WIFI_OFF) ->
+//   the softAP disappears before anyone can connect.
+// With this flag = 0, PowerMonitor::update() and isPowerLost() are
+// no-ops; all other firmware is completely unaffected.
+#define POWER_MONITOR_ENABLED      0       // <<<  set to 1 once HW circuit is built
+
 #define POWER_THRESHOLD_LOW_MV     7350    // trigger shutdown below this (mV, 9V rail)
 #define POWER_THRESHOLD_HIGH_MV    7750    // hysteresis: clear / recover above this (mV)
-#define POWER_STARTUP_GRACE_MS     3000    // ignore readings while supercaps charge
+#define POWER_STARTUP_GRACE_MS    10000    // ignore readings while supercaps charge
+                                           // (was 3000 -- too short; AP needs ~500 ms to
+                                           //  start, leaving almost no margin before the
+                                           //  first loop() checks began firing)
 #define POWER_CHECK_INTERVAL_MS     200    // how often the rail is sampled
 #define POWER_ADC_SAMPLES            16    // oversampling count (noise ~ 1/sqrt(N))
 #define POWER_ADC_SAMPLE_GAP_US     200    // spacing between oversamples
