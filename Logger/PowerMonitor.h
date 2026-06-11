@@ -1,6 +1,18 @@
 /*
- * PowerMonitor.h  -  9V-rail loss detection  (v1)
+ * PowerMonitor.h  -  9V-rail loss detection  (v2)
  * =================================================
+ *
+ * Changes vs. v1
+ * --------------
+ *   ADDED  POWER_MONITOR_ENABLED guard in update() and isPowerLost().
+ *          When Config.h sets POWER_MONITOR_ENABLED = 0 (hardware circuit
+ *          not yet populated), both methods become no-ops so the rest of
+ *          the firmware is completely unaffected.
+ *          Root cause of the WiFi-not-visible bug: GPIO 35 floated to 0 V
+ *          when the divider resistors were absent, readRailMilliVolts()
+ *          returned 0 mV (well below the 7350 mV threshold), and
+ *          handlePowerLoss() was called within ~600 ms of boot, executing
+ *          WiFi.mode(WIFI_OFF) before the softAP was visible to clients.
  *
  * PURPOSE  (Req 13: "allows safe flush of memory if the power connection
  * is determined / lost")
@@ -124,7 +136,11 @@ public:
 
   // Call every loop() iteration.  Does real work only every
   // POWER_CHECK_INTERVAL_MS; cheap to call otherwise.
+  // No-op when POWER_MONITOR_ENABLED == 0 (9V circuit not populated).
   void update() {
+#if POWER_MONITOR_ENABLED == 0
+    return;   // hardware circuit absent -- skip all ADC reads
+#endif
     uint32_t now = millis();
 
     // Hold off while the supercaps charge after power-on.
@@ -156,7 +172,14 @@ public:
   }
 
   // Latched: true once a sustained under-voltage has been confirmed.
-  bool isPowerLost() const { return _powerLost; }
+  // Always returns false when POWER_MONITOR_ENABLED == 0.
+  bool isPowerLost() const {
+#if POWER_MONITOR_ENABLED == 0
+    return false;
+#else
+    return _powerLost;
+#endif
+  }
 
   // Oversampled, factory-calibrated read of the 9V rail in millivolts.
   // Public so the shutdown idle loop can watch for mains recovery.
