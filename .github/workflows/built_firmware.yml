@@ -55,6 +55,7 @@ jobs:
       - name: Install Arduino libraries
         run: |
           arduino-cli lib install "ArduinoJson"
+          arduino-cli lib install "RTClib"
 
       # arduino-cli requires the sketch folder name == .ino filename.
       # Our folder is "Logger/" but the file is "Shelly_ESP32_Logger.ino".
