@@ -1,5 +1,5 @@
 /*
- * Shelly_ESP32_Logger.ino  v2
+ * Shelly_ESP32_Logger.ino  v3
  * ============================
  *
  * Main sketch for the Shelly Plug S MTR Gen3 + ESP32 + SD power logger.
@@ -12,6 +12,10 @@
  *            pinMode(PIN_VSUPPLY, INPUT) placeholder -- Req 13 now implemented)
  *   ADDED    handlePowerLoss()  -- terminal graceful-shutdown sequence
  *   CHANGED  loop() -- power-loss guard runs first, every iteration
+ *   ADDED    #include <RTClib.h>
+ *   ADDED    RTC_DS3231 rtc  (no dependencies)
+ *   CHANGED  Logger logger   (now takes RTC_DS3231& as second argument)
+ *   ADDED    rtc.begin() + lost-power check in setup()
  *   UNCHANGED: everything else (Shelly push path, SD logic, OTA, web UI)
  *
  * Changes vs. PZEM_Logger.ino  v4 (kept for history)
@@ -63,6 +67,7 @@
  */
 
 #include <WiFi.h>            // WiFi.mode(WIFI_OFF) in handlePowerLoss()
+#include <RTClib.h>          // Adafruit RTClib -- DS3231 driver
 #include "Config.h"
 #include "StatusLed.h"
 #include "ShellyClient.h"
@@ -76,7 +81,8 @@
 //    WebPortal depends on both Logger and ShellyClient.
 //    PowerMonitor has no dependencies.
 ShellyClient shelly;
-Logger       logger(shelly);
+RTC_DS3231   rtc;
+Logger       logger(shelly, rtc);
 WebPortal    webPortal(logger, shelly);
 StatusLed    statusLed;
 PowerMonitor powerMonitor;
@@ -93,6 +99,27 @@ void setup() {
   // 9V-rail monitor on GPIO 35 (Req 13). begin() configures the ADC and
   // starts the startup grace window, so it must run early.
   powerMonitor.begin();
+
+  // DS3231 RTC on GPIO 21 (SDA) / GPIO 22 (SCL) -- hardware I2C bus 0.
+  Wire.begin(PIN_RTC_SDA, PIN_RTC_SCL);
+  if (!rtc.begin()) {
+    Serial.println("[Setup] WARNUNG: DS3231 nicht gefunden (I2C-Fehler)!");
+    // Not fatal -- logging continues with unix_ts = 0 (RTC_NOT_SET in CSV).
+  } else if (rtc.lostPower()) {
+    // RTC battery died or first boot after programming.
+    // Time is unknown -- warn loudly; user must set the clock.
+    // To set: connect via Serial and send a sketch that calls
+    //   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // or set it from the web UI once that feature is added.
+    Serial.println("[Setup] WARNUNG: DS3231 hat Stromversorgung verloren -- Uhrzeit nicht gesetzt!");
+    Serial.println("[Setup]          CSV-Spalte 'datetime' zeigt 'RTC_NOT_SET' bis zur Kalibrierung.");
+  } else {
+    DateTime now = rtc.now();
+    Serial.printf("[Setup] RTC OK -- %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                  now.year(), now.month(), now.day(),
+                  now.hour(), now.minute(), now.second());
+  }
+
   // GPIO 33 (manual-reset button, Req 25/26) is not configured here:
   // there is no code that reads it yet. Configure it when the handler exists.
 
