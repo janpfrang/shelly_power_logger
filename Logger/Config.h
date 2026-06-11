@@ -51,8 +51,15 @@
 
 // Shelly push watchdog: if no push is received for this many consecutive
 // expected intervals, the Shelly is declared unreachable (-> LED_ERROR).
-// 3 x 1000 ms = 3 s of silence before error is flagged.
-#define SHELLY_ERROR_THRESHOLD  3
+// 10 x 1000 ms = 10 s of silence before error is flagged.
+//
+// Why 10 and not 3:
+//   When the ESP32 boots after the Shelly, the softAP takes ~1-2 s to start.
+//   The Shelly then needs 3-10 s to re-associate its WiFi to the newly-appeared
+//   AP. With a 3 s threshold the watchdog tripped during that reconnection window
+//   and the UI stayed at '--' permanently. 10 s covers the worst-case
+//   re-association delay with margin, while still flagging a dead Shelly quickly.
+#define SHELLY_ERROR_THRESHOLD  10
 
 // ===== Zeitintervalle (ms) =====
 // INTERVAL_SHELLY_POLL_MS is the EXPECTED push cadence from shelly_push.js.
