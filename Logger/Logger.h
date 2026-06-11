@@ -1,5 +1,5 @@
 /*
- * Logger.h v6  (Shelly + ESP32 + OTA-aware)
+ * Logger.h v7  (Shelly + ESP32 + OTA-aware + DS3231 RTC)
  * ==========================================
  *
  * Changes vs. v5
@@ -11,8 +11,14 @@
  *   CHANGED flushIfDue()  -- returns immediately when OTA is active;
  *                           flushes RAM buffer to SD BEFORE yielding to OTA
  *                           (called explicitly by WebPortal before Update.begin())
+ *   ADDED  RTC DS3231 support via RTClib (Adafruit).
+ *          Logger now takes RTC_DS3231& as second constructor argument.
+ *   CHANGED Sample struct -- added 'uint32_t unix_ts' field (UTC epoch
+ *           from DS3231). millis_ts kept for backward compatibility.
+ *   CHANGED flushToSD() -- writes ISO-8601 datetime as first CSV column.
+ *   CHANGED LOG_FILE_HEADER -- 'datetime' prepended (Config.h v9).
  *   UNCHANGED: everything else -- ShellyClient, SD logic, RAM buffer,
- *              FIFO-drop, SD recovery, all getters, Sample struct.
+ *              FIFO-drop, SD recovery, all getters.
  *
  * OTA DESIGN RATIONALE
  * --------------------
@@ -55,10 +61,12 @@
 #include <SPI.h>
 #include <SD.h>
 #include "Config.h"
+#include <RTClib.h>        // Adafruit RTClib -- DS3231 driver
 #include "ShellyClient.h"
 
 struct Sample {
-  uint32_t millis_ts;
+  uint32_t millis_ts;   // ESP32 uptime ms at time of sample
+  uint32_t unix_ts;     // UTC epoch seconds from DS3231 (0 = RTC not ready)
   float    voltage_V;
   float    power_W;
   float    pf;          // stores pf_apparent in this firmware version
@@ -66,10 +74,10 @@ struct Sample {
 
 class Logger {
 public:
-  // ShellyClient is injected so Logger does not own or initialise it.
-  // This mirrors how v4 owned _pzem but makes the dependency explicit.
-  explicit Logger(ShellyClient& shelly)
+  // ShellyClient and RTC_DS3231 are injected -- Logger does not own either.
+  Logger(ShellyClient& shelly, RTC_DS3231& rtc)
     : _shelly(shelly),
+      _rtc(rtc),
       _sdSPI(VSPI),
       _bufferCount(0),
       _droppedSamples(0),
@@ -161,7 +169,11 @@ public:
 
     // Apply logging threshold (Req 8): only store sample if P >= threshold
     if (P >= _powerThresholdW) {
-      pushSample({ now, V, P, PF });
+      // Read wall-clock time from DS3231. unixtime() returns 0 if the RTC
+      // lost power and was never set -- the CSV will show epoch 0 for those
+      // rows, which is easy to filter in post-processing.
+      uint32_t uts = (uint32_t)_rtc.now().unixtime();
+      pushSample({ now, uts, V, P, PF });
     }
   }
 
@@ -194,7 +206,19 @@ public:
     }
 
     for (size_t i = 0; i < _bufferCount; i++) {
-      f.printf("%lu,%.1f,%.1f,%.2f\n",
+      // Format wall-clock timestamp as ISO-8601: YYYY-MM-DDTHH:MM:SS
+      // If unix_ts == 0 the RTC was not set; write placeholder instead.
+      char dtbuf[20];
+      if (_buffer[i].unix_ts > 0) {
+        DateTime dt(_buffer[i].unix_ts);
+        snprintf(dtbuf, sizeof(dtbuf), "%04d-%02d-%02dT%02d:%02d:%02d",
+                 dt.year(), dt.month(),  dt.day(),
+                 dt.hour(), dt.minute(), dt.second());
+      } else {
+        snprintf(dtbuf, sizeof(dtbuf), "RTC_NOT_SET");
+      }
+      f.printf("%s,%lu,%.1f,%.1f,%.2f\n",
+               dtbuf,
                (unsigned long)_buffer[i].millis_ts,
                _buffer[i].voltage_V,
                _buffer[i].power_W,
@@ -244,6 +268,7 @@ public:
 
 private:
   ShellyClient& _shelly;      // injected reference -- not owned
+  RTC_DS3231&   _rtc;         // injected reference -- not owned
   SPIClass      _sdSPI;
   Sample        _buffer[RAM_BUFFER_SIZE];
   size_t        _bufferCount;
