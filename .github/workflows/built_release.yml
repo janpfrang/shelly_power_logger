@@ -65,6 +65,7 @@ jobs:
       - name: Install Arduino libraries
         run: |
           arduino-cli lib install "ArduinoJson"
+          arduino-cli lib install "RTClib"
 
       # arduino-cli requires sketch folder name == .ino filename
       - name: Prepare sketch folder
