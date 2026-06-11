@@ -64,7 +64,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include "Config.h"
-#include <RTClib.h>        // Adafruit RTClib -- DS3231 driver
+#include "RTClib.h"        // Adafruit RTClib -- DS3231 driver
 #include "ShellyClient.h"
 
 struct Sample {
