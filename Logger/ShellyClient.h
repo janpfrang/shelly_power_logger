@@ -1,5 +1,5 @@
 /*
- * ShellyClient.h  –  Shelly push-data receiver  (v1)
+ * ShellyClient.h  –  Shelly push-data receiver  (v2)
  * ====================================================
  *
  * DESIGN RATIONALE
@@ -23,6 +23,21 @@
  * ShellyClient tracks the time of the last successful ingest.
  * If no push arrives within SHELLY_ERROR_THRESHOLD × INTERVAL_SHELLY_POLL_MS,
  * shellyOk() returns false → Logger::ok() → LED_ERROR (Req 15/16).
+ *
+ * STARTUP GRACE
+ * -------------
+ * When the ESP32 boots after the Shelly is already running, the softAP
+ * takes ~1-2 s to appear and the Shelly WiFi client needs another 3-10 s
+ * to re-associate. During that window no pushes arrive, which would trip
+ * the 3 s watchdog and leave the UI permanently showing '--'.
+ *
+ * Fix: the .ino calls beginStartupGrace() once in setup(). While the grace
+ * is active shellyOk() returns true even with no data yet. The grace clears
+ * itself automatically after SHELLY_STARTUP_GRACE_MS, or immediately when
+ * the first successful push arrives (whichever comes first).
+ *
+ * Unit tests are unaffected: they never call beginStartupGrace(), so the
+ * grace flag stays false and shellyOk() behaves exactly as before.
  *
  * THREAD SAFETY
  * -------------
@@ -52,13 +67,21 @@ class ShellyClient {
 public:
   ShellyClient()
     : _lastPushMs(0),
-      _errorCount(0)
+      _errorCount(0),
+      _graceActive(false),
+      _graceStartMs(0)
   {
     _latest.voltage     = NAN;
     _latest.power       = NAN;
     _latest.current     = NAN;
     _latest.pf_apparent = NAN;
     _latest.valid       = false;
+  }
+
+  // ── Called once from setup() to suppress false-error during boot ──────────
+  void beginStartupGrace() {
+    _graceActive  = true;
+    _graceStartMs = millis();
   }
 
   // ── Called by WebPortal when POST /api/shelly_push arrives ─────────────────
@@ -108,8 +131,9 @@ public:
     _latest.pf_apparent = pf;
     _latest.valid       = true;
 
-    _lastPushMs = millis();
-    _errorCount = 0;   // successful push clears consecutive error count
+    _lastPushMs   = millis();
+    _graceActive  = false;   // first successful push ends the startup grace
+    _errorCount   = 0;       // successful push clears consecutive error count
 
     return true;
   }
@@ -122,6 +146,16 @@ public:
 
   // ── Watchdog: returns false if no push for THRESHOLD × INTERVAL ms ──────────
   bool shellyOk() const {
+    // Startup grace: suppress error while the Shelly re-associates after boot.
+    // beginStartupGrace() must be called explicitly from setup();
+    // unit tests never call it so this branch is never taken in tests.
+    if (_graceActive) {
+      if ((uint32_t)(millis() - _graceStartMs) < SHELLY_STARTUP_GRACE_MS) {
+        return true;
+      }
+      _graceActive = false;   // grace expired
+    }
+
     if (!_latest.valid) return false;   // never received anything
     uint32_t silenceMs = (uint32_t)(millis() - _lastPushMs);
     uint32_t timeout   = (uint32_t)SHELLY_ERROR_THRESHOLD *
@@ -134,8 +168,10 @@ public:
 
 private:
   ShellyMeasurement _latest;
-  uint32_t          _lastPushMs;
+  uint32_t          _lastPushMs;            // millis() of most recent successful push
   uint8_t           _errorCount;
+  mutable bool      _graceActive;           // true while startup grace is in effect
+  uint32_t          _graceStartMs;          // millis() when beginStartupGrace() was called
 };
 
 #endif  // SHELLY_CLIENT_H
