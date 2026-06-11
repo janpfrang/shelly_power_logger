@@ -12,10 +12,11 @@
  *            pinMode(PIN_VSUPPLY, INPUT) placeholder -- Req 13 now implemented)
  *   ADDED    handlePowerLoss()  -- terminal graceful-shutdown sequence
  *   CHANGED  loop() -- power-loss guard runs first, every iteration
- *   ADDED    #include <RTClib.h>
+ *   ADDED    #include <RTClib.h> + #include <Wire.h>
  *   ADDED    RTC_DS3231 rtc  (no dependencies)
- *   CHANGED  Logger logger   (now takes RTC_DS3231& as second argument)
- *   ADDED    rtc.begin() + lost-power check in setup()
+ *   CHANGED  Logger logger   (now takes &rtc as second argument)
+ *   ADDED    Wire.begin() + rtc.begin() + lostPower check in setup()
+ *   ADDED    shelly.beginStartupGrace() after webPortal.begin()
  *   UNCHANGED: everything else (Shelly push path, SD logic, OTA, web UI)
  *
  * Changes vs. PZEM_Logger.ino  v4 (kept for history)
@@ -67,6 +68,7 @@
  */
 
 #include <WiFi.h>            // WiFi.mode(WIFI_OFF) in handlePowerLoss()
+#include <Wire.h>            // I2C bus for DS3231 RTC
 #include <RTClib.h>          // Adafruit RTClib -- DS3231 driver
 #include "Config.h"
 #include "StatusLed.h"
@@ -82,7 +84,7 @@
 //    PowerMonitor has no dependencies.
 ShellyClient shelly;
 RTC_DS3231   rtc;
-Logger       logger(shelly, rtc);
+Logger       logger(shelly, &rtc);   // &rtc: optional pointer; nullptr = RTC absent
 WebPortal    webPortal(logger, shelly);
 StatusLed    statusLed;
 PowerMonitor powerMonitor;
@@ -102,17 +104,12 @@ void setup() {
 
   // DS3231 RTC on GPIO 21 (SDA) / GPIO 22 (SCL) -- hardware I2C bus 0.
   Wire.begin(PIN_RTC_SDA, PIN_RTC_SCL);
-  if (!rtc.begin()) {
+  if (!rtc.begin(&Wire)) {
     Serial.println("[Setup] WARNUNG: DS3231 nicht gefunden (I2C-Fehler)!");
-    // Not fatal -- logging continues with unix_ts = 0 (RTC_NOT_SET in CSV).
+    Serial.println("[Setup]          Logging laeuft weiter, CSV zeigt 'RTC_NOT_SET'.");
   } else if (rtc.lostPower()) {
-    // RTC battery died or first boot after programming.
-    // Time is unknown -- warn loudly; user must set the clock.
-    // To set: connect via Serial and send a sketch that calls
-    //   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    // or set it from the web UI once that feature is added.
-    Serial.println("[Setup] WARNUNG: DS3231 hat Stromversorgung verloren -- Uhrzeit nicht gesetzt!");
-    Serial.println("[Setup]          CSV-Spalte 'datetime' zeigt 'RTC_NOT_SET' bis zur Kalibrierung.");
+    Serial.println("[Setup] WARNUNG: DS3231 Batterie leer / Uhrzeit nicht gesetzt!");
+    Serial.println("[Setup]          Bitte RTC kalibrieren. CSV zeigt 'RTC_NOT_SET'.");
   } else {
     DateTime now = rtc.now();
     Serial.printf("[Setup] RTC OK -- %04d-%02d-%02d %02d:%02d:%02d UTC\n",
@@ -138,6 +135,12 @@ void setup() {
     Serial.println("[Setup] FEHLER: WebPortal konnte nicht gestartet werden!");
     statusLed.setOk(false);
   }
+
+  // Start the boot-order grace window: if the Shelly is already running
+  // when the ESP32 boots, its WiFi client needs up to ~10 s to re-associate
+  // with the freshly-started AP. beginStartupGrace() suppresses the
+  // 3 s watchdog for SHELLY_STARTUP_GRACE_MS so the UI doesn't lock on '--'.
+  shelly.beginStartupGrace();
 
   Serial.println("[Setup] fertig — warte auf ersten Shelly-Push...");
   statusLed.setOk(false);   // stays red until first push arrives
