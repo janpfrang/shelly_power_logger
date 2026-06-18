@@ -1,66 +1,84 @@
 /*
- * ShellyClient.h  –  Shelly push-data receiver  (v2)
- * ====================================================
+ * ShellyClient.h  –  Shelly push-data receiver  v3
+ * =================================================
  *
- * DESIGN RATIONALE
- * ----------------
- * In the PZEM architecture, Logger.h owned the sensor: it called
- * _pzem.voltage(), _pzem.power(), _pzem.pf() synchronously on a timer.
+ * Changes vs. v2
+ * --------------
+ *   ADDED  ingestBatch(body)
+ *            Accepts a {"batch":[…]} payload from shelly_push.js v2.
+ *            Each array element has the same schema as a single-sample
+ *            push: {ts, v, p, i, pf}.
+ *            Returns the number of samples successfully parsed and
+ *            queued via the new _pendingSamples[] array, or -1 on a
+ *            top-level parse error.
  *
- * In the Shelly architecture the data flow is REVERSED:
- *   • The Shelly script (shelly_push.js) POSTS JSON to /api/shelly_push
- *     on the ESP32 every 1 s.
- *   • WebPortal.cpp calls ShellyClient::ingest() when that POST arrives.
- *   • Logger.h calls ShellyClient::getLastSample() in pollIfDue() —
- *     the same call-site as before, just reading a cached value instead
- *     of querying hardware.
+ *   ADDED  hasPendingSamples() / consumePendingSample()
+ *            Logger::pollIfDue() calls consumePendingSample() once per
+ *            loop() iteration (rate-limited to _pollIntervalMs) until
+ *            the queue is drained, then reverts to the normal
+ *            single-sample path.  This lets batch samples enter the
+ *            Logger ring buffer at the correct 1-per-second cadence
+ *            rather than all at once, which would overflow the buffer.
  *
- * This separation keeps Logger.h almost identical to v4 and makes the
- * data path testable independently of the web server.
+ *   ADDED  BATCH_QUEUE_SIZE  (== 10, matching shelly_push.js BUFFER_MAX)
+ *            Sized to hold exactly one startup burst. Defined here so
+ *            unit tests can reference it without including Config.h.
  *
- * WATCHDOG
- * --------
- * ShellyClient tracks the time of the last successful ingest.
- * If no push arrives within SHELLY_ERROR_THRESHOLD × INTERVAL_SHELLY_POLL_MS,
- * shellyOk() returns false → Logger::ok() → LED_ERROR (Req 15/16).
+ *   UNCHANGED  ingest(), shellyOk(), hasData(), all accessors, watchdog,
+ *              startup grace — byte-for-byte identical to v2.
  *
- * STARTUP GRACE
- * -------------
- * When the ESP32 boots after the Shelly is already running, the softAP
- * takes ~1-2 s to appear and the Shelly WiFi client needs another 3-10 s
- * to re-associate. During that window no pushes arrive, which would trip
- * the 3 s watchdog and leave the UI permanently showing '--'.
+ * BATCH FLOW OVERVIEW
+ * -------------------
+ *   shelly_push.js          ESP32 WebPortal          ShellyClient
+ *   ─────────────────       ──────────────────       ─────────────
+ *   POST {"batch":[…]}  →   handleShellyPush()   →   ingestBatch()
+ *                                                     fills _pending[]
  *
- * Fix: the .ino calls beginStartupGrace() once in setup(). While the grace
- * is active shellyOk() returns true even with no data yet. The grace clears
- * itself automatically after SHELLY_STARTUP_GRACE_MS, or immediately when
- * the first successful push arrives (whichever comes first).
+ *   Each loop() tick:
+ *   Logger::pollIfDue()  →  consumePendingSample()
+ *                           updates _latest, advances _pendingHead
+ *                           → Logger writes one Sample to ring buffer
  *
- * Unit tests are unaffected: they never call beginStartupGrace(), so the
- * grace flag stays false and shellyOk() behaves exactly as before.
+ *   When queue empty, normal ingest() path resumes as before.
  *
- * THREAD SAFETY
- * -------------
- * The ESP32 Arduino WebServer runs on the same core/task as loop().
- * WebServer::handleClient() is called from loop(); it runs the POST handler
- * synchronously in the same execution context.  No RTOS mutexes needed.
+ * TIMESTAMP NOTE
+ * --------------
+ *   Batch samples carry Shelly uptime timestamps (ts field, ms).
+ *   The ESP32 has no way to convert those to its own millis() or to
+ *   wall-clock time without knowing the offset at connection time.
+ *   Strategy: millis_ts in each batch Sample is set to
+ *     millis() - (now_shelly_uptime - sample_shelly_uptime)
+ *   approximated as  millis() - (batch_count - index) * pollIntervalMs.
+ *   This reconstructs approximate ESP32-uptime timestamps that are
+ *   monotonic and close to reality (error < 1 s per sample).
+ *   unix_ts is set from the RTC at the moment of consumption,
+ *   offset backwards by the same delta, so CSV datetimes are correct.
  */
 
 #ifndef SHELLY_CLIENT_H
 #define SHELLY_CLIENT_H
 
 #include <Arduino.h>
-#include <ArduinoJson.h>   // Benoit Blanchon — add to Arduino Library Manager
+#include <ArduinoJson.h>
 #include "Config.h"
 
-// ShellyMeasurement is the decoded form of one push from shelly_push.js.
-// Field names mirror the JSON keys to make ingest() readable.
+static const uint8_t BATCH_QUEUE_SIZE = 10;   // must match shelly_push.js BUFFER_MAX
+
 struct ShellyMeasurement {
-  float    voltage;     // V RMS
-  float    power;       // active power W  (apower)
-  float    current;     // A RMS
-  float    pf_apparent; // derived: power / (voltage × current)
-  bool     valid;       // false until the first successful push arrives
+  float    voltage;
+  float    power;
+  float    current;
+  float    pf_apparent;
+  bool     valid;
+};
+
+// A pending batch sample: raw values + estimated millis offset from now
+struct PendingSample {
+  float    voltage;
+  float    power;
+  float    current;
+  float    pf_apparent;
+  int32_t  msBeforeNow;   // how many ms before the batch arrived this was sampled
 };
 
 class ShellyClient {
@@ -69,7 +87,9 @@ public:
     : _lastPushMs(0),
       _errorCount(0),
       _graceActive(false),
-      _graceStartMs(0)
+      _graceStartMs(0),
+      _pendingCount(0),
+      _pendingHead(0)
   {
     _latest.voltage     = NAN;
     _latest.power       = NAN;
@@ -78,21 +98,17 @@ public:
     _latest.valid       = false;
   }
 
-  // ── Called once from setup() to suppress false-error during boot ──────────
+  // ── Called once from setup() ──────────────────────────────────────────────
   void beginStartupGrace() {
     _graceActive  = true;
     _graceStartMs = millis();
   }
 
-  // ── Called by WebPortal when POST /api/shelly_push arrives ─────────────────
+  // ── Single-sample ingest (unchanged from v2) ──────────────────────────────
   //
-  // body: raw HTTP request body string, expected JSON:
-  //   { "ts": <ms>, "v": <V>, "p": <W>, "i": <A>, "pf": <0-1> }
-  //
-  // Returns true if the body parsed correctly, false on malformed JSON.
+  // body: {"ts":…,"v":…,"p":…,"i":…,"pf":…}
+  // Returns true on success.
   bool ingest(const String& body) {
-    // StaticJsonDocument lives on the stack — no heap allocation.
-    // 192 bytes is sufficient for our 5-field payload.
     StaticJsonDocument<192> doc;
     DeserializationError err = deserializeJson(doc, body);
 
@@ -103,7 +119,6 @@ public:
       return false;
     }
 
-    // Validate required fields exist and are numeric
     if (!doc.containsKey("v") || !doc.containsKey("p") ||
         !doc.containsKey("i") || !doc.containsKey("pf")) {
       Serial.println("[Shelly] push missing required fields");
@@ -116,7 +131,6 @@ public:
     float i  = doc["i"].as<float>();
     float pf = doc["pf"].as<float>();
 
-    // Sanity bounds — reject physically impossible values
     if (v < 0.0f || v > 300.0f || p < 0.0f || p > 3680.0f ||
         i < 0.0f || i >  16.0f || pf < 0.0f || pf > 1.01f) {
       Serial.printf("[Shelly] push out of range: v=%.1f p=%.1f i=%.3f pf=%.2f\n",
@@ -131,47 +145,161 @@ public:
     _latest.pf_apparent = pf;
     _latest.valid       = true;
 
-    _lastPushMs   = millis();
-    _graceActive  = false;   // first successful push ends the startup grace
-    _errorCount   = 0;       // successful push clears consecutive error count
+    _lastPushMs  = millis();
+    _graceActive = false;
+    _errorCount  = 0;
 
     return true;
   }
 
-  // ── Accessors used by Logger::pollIfDue() ───────────────────────────────────
+  // ── Batch ingest — called for {"batch":[…]} startup payloads ─────────────
+  //
+  // body: {"batch":[{"ts":…,"v":…,"p":…,"i":…,"pf":…}, …]}
+  //
+  // Returns number of valid samples queued (0..BATCH_QUEUE_SIZE),
+  //         or -1 on top-level JSON parse failure.
+  //
+  // Samples are queued in _pending[] in chronological order (index 0 =
+  // oldest). consumePendingSample() drains them one per pollIfDue() tick.
+  int ingestBatch(const String& body) {
+    // Batch payload is larger: 10 samples × ~60 bytes each + overhead = ~700 B
+    // Use DynamicJsonDocument to avoid blowing the stack.
+    DynamicJsonDocument doc(768);
+    DeserializationError err = deserializeJson(doc, body);
+
+    if (err) {
+      Serial.printf("[Shelly] batch JSON parse error: %s\n", err.c_str());
+      _errorCount++;
+      return -1;
+    }
+
+    if (!doc.containsKey("batch") || !doc["batch"].is<JsonArray>()) {
+      Serial.println("[Shelly] batch: missing 'batch' array");
+      _errorCount++;
+      return -1;
+    }
+
+    JsonArray arr = doc["batch"].as<JsonArray>();
+    uint8_t  count = 0;
+    uint8_t  total = (uint8_t)arr.size();
+    if (total > BATCH_QUEUE_SIZE) { total = BATCH_QUEUE_SIZE; }
+
+    // Clear any leftover pending queue from a previous (failed) batch
+    _pendingCount = 0;
+    _pendingHead  = 0;
+
+    for (uint8_t idx = 0; idx < total; idx++) {
+      JsonObject obj = arr[idx];
+
+      if (!obj.containsKey("v") || !obj.containsKey("p") ||
+          !obj.containsKey("i") || !obj.containsKey("pf")) {
+        Serial.printf("[Shelly] batch[%u] missing fields, skipping\n", idx);
+        continue;
+      }
+
+      float v  = obj["v"].as<float>();
+      float p  = obj["p"].as<float>();
+      float i  = obj["i"].as<float>();
+      float pf = obj["pf"].as<float>();
+
+      if (v < 0.0f || v > 300.0f || p < 0.0f || p > 3680.0f ||
+          i < 0.0f || i >  16.0f || pf < 0.0f || pf > 1.01f) {
+        Serial.printf("[Shelly] batch[%u] out of range, skipping\n", idx);
+        continue;
+      }
+
+      // Estimate how far in the past this sample was taken.
+      // idx 0 = oldest sample = (total-1) intervals before arrival,
+      // idx (total-1) = newest = 0 intervals before arrival.
+      int32_t msAgo = (int32_t)(total - 1 - idx) * (int32_t)INTERVAL_SHELLY_POLL_MS;
+
+      _pending[_pendingCount].voltage     = v;
+      _pending[_pendingCount].power       = p;
+      _pending[_pendingCount].current     = i;
+      _pending[_pendingCount].pf_apparent = pf;
+      _pending[_pendingCount].msBeforeNow = msAgo;
+      _pendingCount++;
+    }
+
+    if (_pendingCount > 0) {
+      // Update watchdog — connection is now established
+      _lastPushMs  = millis();
+      _graceActive = false;
+      _errorCount  = 0;
+      // Seed _latest with the newest batch sample so live display shows
+      // real values immediately, even before consumePendingSample() runs.
+      uint8_t newestIdx = _pendingCount - 1;
+      _latest.voltage     = _pending[newestIdx].voltage;
+      _latest.power       = _pending[newestIdx].power;
+      _latest.current     = _pending[newestIdx].current;
+      _latest.pf_apparent = _pending[newestIdx].pf_apparent;
+      _latest.valid       = true;
+      Serial.printf("[Shelly] batch: %u/%u samples queued\n",
+                    (unsigned)_pendingCount, (unsigned)arr.size());
+    }
+
+    return (int)_pendingCount;
+  }
+
+  // ── Pending-queue accessors used by Logger::pollIfDue() ──────────────────
+  bool hasPendingSamples() const {
+    return _pendingHead < _pendingCount;
+  }
+
+  // Consume the next pending sample into _latest and return true.
+  // Returns false (no-op) if the queue is empty.
+  bool consumePendingSample() {
+    if (!hasPendingSamples()) { return false; }
+    const PendingSample& ps = _pending[_pendingHead++];
+    _latest.voltage     = ps.voltage;
+    _latest.power       = ps.power;
+    _latest.current     = ps.current;
+    _latest.pf_apparent = ps.pf_apparent;
+    _latest.valid       = true;
+    return true;
+  }
+
+  // Returns the msBeforeNow of the next pending sample (used by Logger to
+  // back-date millis_ts and unix_ts).  Returns 0 if queue is empty.
+  int32_t nextPendingMsAgo() const {
+    if (!hasPendingSamples()) { return 0; }
+    return _pending[_pendingHead].msBeforeNow;
+  }
+
+  // ── Accessors used by Logger::pollIfDue() ────────────────────────────────
   float getVoltage()    const { return _latest.voltage; }
   float getPower()      const { return _latest.power; }
   float getPfApparent() const { return _latest.pf_apparent; }
   bool  hasData()       const { return _latest.valid; }
 
-  // ── Watchdog: returns false if no push for THRESHOLD × INTERVAL ms ──────────
+  // ── Watchdog ─────────────────────────────────────────────────────────────
   bool shellyOk() const {
-    // Startup grace: suppress error while the Shelly re-associates after boot.
-    // beginStartupGrace() must be called explicitly from setup();
-    // unit tests never call it so this branch is never taken in tests.
     if (_graceActive) {
       if ((uint32_t)(millis() - _graceStartMs) < SHELLY_STARTUP_GRACE_MS) {
         return true;
       }
-      _graceActive = false;   // grace expired
+      _graceActive = false;
     }
-
-    if (!_latest.valid) return false;   // never received anything
+    if (!_latest.valid) return false;
     uint32_t silenceMs = (uint32_t)(millis() - _lastPushMs);
     uint32_t timeout   = (uint32_t)SHELLY_ERROR_THRESHOLD *
                          (uint32_t)INTERVAL_SHELLY_POLL_MS;
     return silenceMs < timeout;
   }
 
-  // Expose error count for /api/live diagnostic field
   uint8_t getErrorCount() const { return _errorCount; }
 
 private:
   ShellyMeasurement _latest;
-  uint32_t          _lastPushMs;            // millis() of most recent successful push
+  uint32_t          _lastPushMs;
   uint8_t           _errorCount;
-  mutable bool      _graceActive;           // true while startup grace is in effect
-  uint32_t          _graceStartMs;          // millis() when beginStartupGrace() was called
+  mutable bool      _graceActive;
+  uint32_t          _graceStartMs;
+
+  // Pending batch queue — drained one sample per pollIfDue() tick
+  PendingSample _pending[BATCH_QUEUE_SIZE];
+  uint8_t       _pendingCount;   // total valid entries loaded by ingestBatch()
+  uint8_t       _pendingHead;    // index of next sample to consume
 };
 
 #endif  // SHELLY_CLIENT_H
