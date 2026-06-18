@@ -1,38 +1,31 @@
 /*
- * WebPortal.h v7  (Shelly + ESP32 + OTA)
- * ========================================
+ * WebPortal.h v8  (Shelly + ESP32 + OTA + RTC set-time)
+ * =======================================================
  *
- * Changes vs. v6 (Shelly + ESP32):
- *   ADDED    #include <Update.h>
- *   ADDED    handleOtaForm()    -- GET  /update  (upload form page)
- *   ADDED    handleOtaUpload()  -- POST /update  (binary stream handler)
- *   ADDED    route registrations for GET+POST /update in begin()
- *   CHANGED  handleApiLive()    -- adds "ota_active" boolean field
- *   NOTE     API_BUFFER_SIZE 320 in Config.h is still sufficient
- *            (worst-case /api/live JSON is ~146 chars)
- *   UNCHANGED: all other routes, pages, members, and handlers
+ * Changes vs. v7 (Shelly + ESP32 + OTA):
+ *   ADDED    #include <RTClib.h>
+ *   CHANGED  Constructor: third parameter RTC_DS3231* rtc = nullptr
+ *   ADDED    _rtc member (RTC_DS3231*)
+ *   ADDED    handleApiSetRtc()   -- POST /api/set_rtc
+ *   ADDED    route registration  POST /api/set_rtc  in begin()
+ *   CHANGED  PAGE_SETTINGS       -- "Set RTC Time" card added
+ *   CHANGED  PAGE_INDEX          -- RTC time display added to status card
+ *   UNCHANGED: all other routes, pages, handlers
  *
- * OTA UPLOAD FLOW
- * ---------------
- *  1. User opens  GET /update  -> served PAGE_OTA (upload form)
- *  2. User selects .bin, clicks Upload
- *  3. Browser POSTs multipart/form-data to POST /update
- *  4. WebServer calls the upload callback for each chunk
- *     (registered via _server.onFileUpload -- see begin())
- *  5. On first chunk: _logger.setOtaInProgress(true) -> flushes SD,
- *     pauses polling; Update.begin(UPDATE_SIZE_UNKNOWN) starts flash writer
- *  6. Per chunk: Update.write(data, len)
- *  7. On last chunk: Update.end(true) -- finalises flash; ESP32 reboots
- *  8. On any error: Update.abort(), _logger.setOtaInProgress(false)
- *     -> logging resumes (no reboot on error)
+ * SET-RTC FLOW
+ * ------------
+ *  1. User opens /settings
+ *  2. Browser pre-fills <input type="datetime-local"> with local time
+ *  3. User clicks "Set RTC Time"
+ *  4. JS reads the picker value, POSTs JSON to POST /api/set_rtc:
+ *       { "year":2026, "month":6, "day":18,
+ *         "hour":14,   "minute":33, "second":0 }
+ *  5. handleApiSetRtc() calls _rtc->adjust(DateTime(...))
+ *  6. ESP responds { "ok":true, "time":"2026-06-18T14:33:00" }
+ *  7. JS shows a confirmation message with the confirmed time
  *
- * SECURITY NOTE
- * -------------
- * This OTA endpoint has NO authentication.  It is only reachable from
- * devices connected to the PZEM_Logger Wi-Fi access point.  Physical
- * proximity to the device is required -- acceptable for a lab instrument.
- * If you deploy this in a shared-network context, add HTTP Basic Auth
- * or move the endpoint behind a separate port.
+ * If _rtc == nullptr (RTC not wired or begin() failed) the handler
+ * responds 503 {"error":"RTC not available"} -- graceful degradation.
  */
 
 #ifndef WEB_PORTAL_H
@@ -44,16 +37,18 @@
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <Update.h>          // ESP32 OTA flash writer (bundled with arduino-esp32)
+#include <RTClib.h>          // Adafruit RTClib -- DS3231 driver
 #include "Config.h"
 #include "Logger.h"
 #include "ShellyClient.h"
 
 class WebPortal {
 public:
-  // Both Logger and ShellyClient are injected.
-  // ShellyClient::ingest() is called directly from handleShellyPush()
-  // so the data path bypasses Logger entirely for the push endpoint.
-  WebPortal(Logger& logger, ShellyClient& shelly);
+  // Logger and ShellyClient are injected (required).
+  // RTC_DS3231 is optional: pass nullptr when the RTC is absent.
+  // Keeping nullptr as default preserves backward-compatibility if any
+  // test harness constructs WebPortal without an RTC.
+  WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc = nullptr);
 
   bool begin();
   void update();
@@ -61,10 +56,11 @@ public:
 private:
   Logger&       _logger;
   ShellyClient& _shelly;
+  RTC_DS3231*   _rtc;        // optional -- nullptr means no RTC available
   WebServer     _server;
   DNSServer     _dns;
 
-  // -- Existing routes (unchanged from v5) ----------------------------------
+  // -- Page handlers (unchanged from v7) ------------------------------------
   void handleRoot();
   void handleApiLive();
   void handleApiSettings();
@@ -78,17 +74,23 @@ private:
   void handleCaptivePortal();
   void handleNotFound();
 
-  // -- New route -------------------------------------------------------------
   // POST /api/shelly_push  -- called by shelly_push.js on the Shelly device
   void handleShellyPush();
 
-  // -- OTA routes ------------------------------------------------------------
-  // GET  /update  -- serves the firmware upload form (PAGE_OTA)
+  // -- OTA routes (unchanged from v7) ---------------------------------------
   void handleOtaForm();
-  // POST /update  -- body handler (called once, sends final HTTP response)
   void handleOtaUpload();
-  // Upload callback -- called per-chunk by WebServer during multipart upload
   void handleOtaChunk();
+
+  // -- RTC set-time route (NEW v8) ------------------------------------------
+  // POST /api/set_rtc
+  // Body (application/json):
+  //   { "year":YYYY, "month":M, "day":D,
+  //     "hour":H, "minute":M, "second":S }
+  // Response 200: { "ok":true, "time":"YYYY-MM-DDTHH:MM:SS" }
+  // Response 400: { "error":"..." }  -- missing / out-of-range fields
+  // Response 503: { "error":"RTC not available" }  -- _rtc == nullptr
+  void handleApiSetRtc();
 };
 
 #endif  // WEB_PORTAL_H
