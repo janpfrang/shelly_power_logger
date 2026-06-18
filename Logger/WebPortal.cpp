@@ -28,7 +28,7 @@
 // PAGE_INDEX  -- RTC time display added to status card
 // -----------------------------------------------------------------------------
 static const char PAGE_INDEX[] PROGMEM = R"HTML(
-<!DOCTYPE html><html lang="de"><head>
+<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PZEM Logger</title>
@@ -65,10 +65,10 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
 
 <h1>BRAUN Shelly Power Logger</h1>
 
-<div id="ota-banner" class="banner">&#x2B06; Firmware-Update l&auml;uft &mdash; bitte warten&hellip;</div>
+<div id="ota-banner" class="banner">&#x2B06; Firmware update in progress &mdash; please wait&hellip;</div>
 
 <div class="card">
-  <div class="label">Aktuelle Werte</div>
+  <div class="label">Live readings</div>
   <div class="live"><span id="power">&mdash;</span> W</div>
   <div class="sub-live">
     <span id="voltage">&mdash;</span> V &nbsp;|&nbsp; pf<sub>apparent</sub>: <span id="pf">&mdash;</span>
@@ -77,8 +77,8 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
   <div class="status">
     Shelly: <span id="shelly-status" class="ok">?</span>
     SD:     <span id="sd-status"     class="ok">?</span><br><br>
-    Puffer: <span id="buf">0</span>
-    | Verworfen: <span id="drop">0</span>
+    Buffer: <span id="buf">0</span>
+    | Dropped: <span id="drop">0</span>
     | Uptime: <span id="uptime">0</span> s
   </div>
   <div class="rtc-row">&#x1F551; RTC: <span id="rtc-time">&mdash;</span></div>
@@ -98,11 +98,11 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
 
 <script>
 function confirmReset() {
-  if (!confirm('Wirklich alle Log-Daten auf der SD-Karte l&ouml;schen?')) return;
+  if (!confirm('Really delete all log data on the SD card?')) return;
   fetch('/reset', { method: 'POST' })
     .then(r => r.text())
     .then(t => alert(t))
-    .catch(e => alert('Fehler: ' + e));
+    .catch(e => alert('Error: ' + e));
 }
 
 async function refresh() {
@@ -117,10 +117,10 @@ async function refresh() {
     document.getElementById('drop').textContent    = d.dropped;
     document.getElementById('uptime').textContent  = d.uptime;
     const se = document.getElementById('shelly-status');
-    se.textContent = d.shelly_ok ? 'OK' : 'FEHLER';
+    se.textContent = d.shelly_ok ? 'OK' : 'ERROR';
     se.className   = d.shelly_ok ? 'ok' : 'err';
     const sd = document.getElementById('sd-status');
-    sd.textContent = d.sd_ok ? 'OK' : 'FEHLER';
+    sd.textContent = d.sd_ok ? 'OK' : 'ERROR';
     sd.className   = d.sd_ok   ? 'ok' : 'err';
     document.getElementById('ota-banner').style.display =
       d.ota_active ? 'block' : 'none';
@@ -130,7 +130,7 @@ async function refresh() {
       rt.textContent = d.rtc_time;
       rt.style.color = '#060';
     } else {
-      rt.textContent = 'nicht gesetzt \u2014 bitte unter Settings kalibrieren';
+      rt.textContent = 'not set \u2014 please calibrate under Settings';
       rt.style.color = '#a00';
     }
   } catch (e) {
@@ -360,7 +360,7 @@ async function loadRtcDisplay() {
       el.textContent = d.rtc_time;
       el.style.color = '#060';
     } else {
-      el.textContent = 'nicht gesetzt';
+      el.textContent = 'not set';
       el.style.color = '#a00';
     }
   } catch(e) { /* ignore */ }
@@ -369,7 +369,7 @@ async function loadRtcDisplay() {
 async function setRtcTime() {
   const val = document.getElementById('rtc-picker').value;
   if (!val) {
-    setRtcMsg('Bitte Datum und Uhrzeit ausw\u00e4hlen.', 'err');
+    setRtcMsg('Please select a date and time.', 'err');
     return;
   }
   // Parse "YYYY-MM-DDTHH:MM:SS" (or "YYYY-MM-DDTHH:MM" without seconds)
@@ -386,7 +386,7 @@ async function setRtcTime() {
   };
 
   document.getElementById('rtc-btn').disabled = true;
-  setRtcMsg('Setze RTC\u2026', '');
+  setRtcMsg('Setting RTC\u2026', '');
 
   try {
     const r = await fetch('/api/set_rtc', {
@@ -396,14 +396,14 @@ async function setRtcTime() {
     });
     const d = await r.json();
     if (r.ok && d.ok) {
-      setRtcMsg('\u2713 RTC gesetzt: ' + d.time, 'ok');
+      setRtcMsg('\u2713 RTC set: ' + d.time, 'ok');
       document.getElementById('rtc-display').textContent = d.time;
       document.getElementById('rtc-display').style.color = '#060';
     } else {
-      setRtcMsg('\u2717 Fehler: ' + (d.error || 'Unbekannt'), 'err');
+      setRtcMsg('\u2717 Error: ' + (d.error || 'Unknown error'), 'err');
     }
   } catch(e) {
-    setRtcMsg('\u2717 Netzwerkfehler: ' + e.message, 'err');
+    setRtcMsg('\u2717 Network error: ' + e.message, 'err');
   }
   document.getElementById('rtc-btn').disabled = false;
 }
@@ -426,7 +426,7 @@ loadRtcDisplay();
 // PAGE_LIVEPLOT  -- unchanged from v7
 // -----------------------------------------------------------------------------
 static const char PAGE_LIVEPLOT[] PROGMEM = R"HTML(
-<!DOCTYPE html><html lang="de"><head>
+<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Live Scope &ndash; Shelly Logger</title>
 <style>
@@ -445,17 +445,17 @@ static const char PAGE_LIVEPLOT[] PROGMEM = R"HTML(
   .legend { font-size: 0.85em; color: #666; margin-top: 0.5em; text-align: center; }
 </style>
 </head><body>
-<h1>Echtzeit Leistungsprofil</h1>
+<h1>Live Power Profile</h1>
 <div class="card">
   <div class="metrics-row">
-    <div>Aktuell: <span id="val-w">&mdash;</span> W</div>
-    <div>Spannung: <span id="val-v">&mdash;</span> V</div>
+    <div>Current: <span id="val-w">&mdash;</span> W</div>
+    <div>Voltage: <span id="val-v">&mdash;</span> V</div>
     <div>Max: <span id="val-max">&mdash;</span> W</div>
   </div>
   <canvas id="scopeCanvas" width="600" height="280"></canvas>
-  <div class="legend">Timeline-Profil &mdash; Automatische Skalierung der Ordinate</div>
+  <div class="legend">Timeline profile &mdash; auto-scaling Y axis</div>
 </div>
-<a class="back" href="/">&larr; Zur&uuml;ck</a>
+<a class="back" href="/">&larr; Back</a>
 
 <script>
 const canvas = document.getElementById('scopeCanvas');
@@ -522,7 +522,7 @@ function renderChart() {
   ctx.fillText('-' + totalSec + 's', pL, pT + gH + 6);
   ctx.fillText('-' + Math.round(totalSec / 2) + 's', pL + gW / 2, pT + gH + 6);
   ctx.fillStyle = '#28a745';
-  ctx.fillText('Jetzt', canvas.width - pR, pT + gH + 6);
+  ctx.fillText('Now', canvas.width - pR, pT + gH + 6);
   ctx.strokeStyle = '#28a745'; ctx.lineWidth = 2.5;
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.beginPath();
@@ -948,23 +948,23 @@ WebPortal::WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc)
   : _logger(logger), _shelly(shelly), _rtc(rtc), _server(HTTP_PORT) {}
 
 bool WebPortal::begin() {
-  Serial.println("[Web] Starte WLAN AP+STA...");
+  Serial.println("[Web] Starting WLAN AP+STA...");
 
   WiFi.mode(WIFI_AP_STA);
 
   if (!WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD)) {
-    Serial.println("[Web] softAP() fehlgeschlagen!");
+    Serial.println("[Web] softAP() failed!");
     return false;
   }
   IPAddress ip = WiFi.softAPIP();
-  Serial.printf("[Web] AP '%s' aktiv, IP: %s\n", WIFI_AP_SSID, ip.toString().c_str());
+  Serial.printf("[Web] AP '%s' active, IP: %s\n", WIFI_AP_SSID, ip.toString().c_str());
 
   _dns.start(DNS_PORT, "*", ip);
-  Serial.println("[Web] DNS-Server gestartet (catch-all)");
+  Serial.println("[Web] DNS server started (catch-all)");
 
   if (MDNS.begin(WIFI_AP_HOSTNAME)) {
     MDNS.addService("http", "tcp", HTTP_PORT);
-    Serial.printf("[Web] mDNS aktiv: http://%s.local\n", WIFI_AP_HOSTNAME);
+    Serial.printf("[Web] mDNS active: http://%s.local\n", WIFI_AP_HOSTNAME);
   }
 
   // -- Captive portal probes -----------------------------------------------
@@ -997,7 +997,7 @@ bool WebPortal::begin() {
   _server.onNotFound(                          [this](){ handleNotFound(); });
 
   _server.begin();
-  Serial.println("[Web] HTTP-Server gestartet");
+  Serial.println("[Web] HTTP server started");
   return true;
 }
 
@@ -1083,7 +1083,7 @@ void WebPortal::handleDownload() {
   _logger.flushToSD();
   File f = _logger.openLogFileForRead();
   if (!f) {
-    _server.send(404, "text/plain", "Log-Datei nicht gefunden oder SD-Fehler.");
+    _server.send(404, "text/plain", "Log file not found or SD error.");
     return;
   }
   _server.sendHeader("Content-Type", "text/csv");
@@ -1094,9 +1094,9 @@ void WebPortal::handleDownload() {
 
 void WebPortal::handleReset() {
   if (_logger.resetSDFile()) {
-    _server.send(200, "text/plain", "Log-Datei wurde geloescht und neu angelegt.");
+    _server.send(200, "text/plain", "Log file deleted and recreated.");
   } else {
-    _server.send(500, "text/plain", "Fehler beim Loeschen der Log-Datei (SD nicht verfuegbar?).");
+    _server.send(500, "text/plain", "Error deleting log file (SD not available?).");
   }
 }
 
@@ -1131,7 +1131,7 @@ void WebPortal::handleApiSettingsSave() {
     for (auto v : allowed_ms) { if (ms == v) { valid = true; break; } }
     if (valid) {
       _logger.setPollInterval(ms);
-      Serial.printf("[Web] Poll-Intervall gesetzt: %lu ms\n", (unsigned long)ms);
+      Serial.printf("[Web] Poll interval set: %lu ms\n", (unsigned long)ms);
     } else {
       _server.send(400, "application/json", "{\"error\":\"invalid poll_ms\"}");
       return;
@@ -1145,7 +1145,7 @@ void WebPortal::handleApiSettingsSave() {
     for (auto v : allowed_w) { if (thresh == v) { valid = true; break; } }
     if (valid) {
       _logger.setPowerThreshold((float)thresh);
-      Serial.printf("[Web] Power-Threshold gesetzt: %d W\n", thresh);
+      Serial.printf("[Web] Power threshold set: %d W\n", thresh);
     } else {
       _server.send(400, "application/json", "{\"error\":\"invalid power_threshold\"}");
       return;
@@ -1169,12 +1169,12 @@ void WebPortal::handleOtaUpload() {
   if (Update.hasError()) {
     _logger.setOtaInProgress(false);
     String err = Update.errorString();
-    Serial.printf("[OTA] Fehlgeschlagen: %s\n", err.c_str());
-    _server.send(500, "text/plain", "OTA fehlgeschlagen: " + err);
+    Serial.printf("[OTA] Failed: %s\n", err.c_str());
+    _server.send(500, "text/plain", "OTA failed: " + err);
   } else {
     _server.send(200, "text/plain", "OK");
     delay(200);
-    Serial.println("[OTA] Erfolgreich -- Neustart...");
+    Serial.println("[OTA] Success -- rebooting...");
     ESP.restart();
   }
 }
@@ -1184,31 +1184,31 @@ void WebPortal::handleOtaChunk() {
   HTTPUpload& upload = _server.upload();
 
   if (upload.status == UPLOAD_FILE_START) {
-    Serial.printf("[OTA] Start: %s  (%u Bytes erwartet)\n",
+    Serial.printf("[OTA] Start: %s  (%u bytes expected)\n",
                   upload.filename.c_str(), upload.totalSize);
     _logger.setOtaInProgress(true);
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-      Serial.printf("[OTA] Update.begin() fehlgeschlagen: %s\n",
+      Serial.printf("[OTA] Update.begin() failed: %s\n",
                     Update.errorString());
     }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-      Serial.printf("[OTA] Update.write() Fehler bei Byte %u: %s\n",
+      Serial.printf("[OTA] Update.write() error at byte %u: %s\n",
                     upload.totalSize, Update.errorString());
     } else {
       if ((upload.totalSize / upload.currentSize) % 64 == 0) Serial.print('.');
     }
   } else if (upload.status == UPLOAD_FILE_END) {
-    Serial.printf("\n[OTA] Uebertragen: %u Bytes -- finalisiere...\n",
+    Serial.printf("\n[OTA] Received: %u bytes -- finalising...\n",
                   upload.totalSize);
     if (!Update.end(true)) {
-      Serial.printf("[OTA] Update.end() fehlgeschlagen: %s\n",
+      Serial.printf("[OTA] Update.end() failed: %s\n",
                     Update.errorString());
     }
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
     Update.abort();
     _logger.setOtaInProgress(false);
-    Serial.println("[OTA] Upload abgebrochen -- Logging wiederhergestellt");
+    Serial.println("[OTA] Upload aborted -- logging restored");
   }
 }
 
@@ -1234,7 +1234,7 @@ void WebPortal::handleNotFound() {
 void WebPortal::handleApiSetRtc() {
   if (_rtc == nullptr) {
     _server.send(503, "application/json", "{\"error\":\"RTC not available\"}");
-    Serial.println("[RTC] set_rtc abgelehnt: kein RTC-Objekt");
+    Serial.println("[RTC] set_rtc rejected: no RTC object");
     return;
   }
 
@@ -1300,5 +1300,5 @@ void WebPortal::handleApiSetRtc() {
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"time\":\"%s\"}", timebuf);
   _server.send(200, "application/json", resp);
 
-  Serial.printf("[RTC] Zeit gesetzt: %s\n", timebuf);
+  Serial.printf("[RTC] Time set: %s\n", timebuf);
 }
