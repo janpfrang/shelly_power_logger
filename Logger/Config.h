@@ -1,6 +1,20 @@
 /*
- * Config.h - Zentrale Konfiguration v9  (Shelly + ESP32 + OTA + Power-loss + RTC)
- * ==============================================================================
+ * Config.h - Zentrale Konfiguration v10  (Shelly + ESP32 + OTA + Power-loss + RTC)
+ * =================================================================================
+ *
+ * Changes vs. v9:
+ *   CHANGED  SHELLY_ERROR_THRESHOLD  3 -> 5
+ *              Root cause of observed log gaps and 5 Hz LED blink:
+ *              The Shelly mJS timer and the ESP32 SD-flush (~50-200 ms on
+ *              slow SD cards) can together delay or drop a push reply.
+ *              With threshold=3 a single missed push during a 10 s SD flush
+ *              was enough to trip the 3 s watchdog, halting logging and
+ *              triggering LED_ERROR.
+ *              Raising to 5 (= 5 s silence required) absorbs transient
+ *              Wi-Fi jitter and SD-flush latency without masking a genuine
+ *              Shelly disconnect (which produces silence >> 5 s).
+ *              No other code changes required -- ShellyClient uses this
+ *              constant directly in shellyOk().
  *
  * Changes vs. v7 (Shelly + ESP32 + OTA + Power-loss):
  *   ADDED    POWER_MONITOR_ENABLED  -- set to 0 to disable the power-loss
@@ -16,7 +30,6 @@
  *              first loop() iterations consumed the remaining grace window
  *              before the AP was fully established.  10 s is safe for all
  *              hardware states.
- *   ALL other constants unchanged
  */
 
 #ifndef CONFIG_H
@@ -59,8 +72,16 @@
 
 // Shelly push watchdog: if no push is received for this many consecutive
 // expected intervals, the Shelly is declared unreachable (-> LED_ERROR).
-// 3 x 1000 ms = 3 s of silence before error is flagged during normal operation.
-#define SHELLY_ERROR_THRESHOLD   3
+// 5 x 1000 ms = 5 s of silence before error is flagged during normal operation.
+//
+// Raised from 3 to 5 (v10):
+//   A 10 s SD flush can delay the ESP32's HTTP response by 50-200 ms per push.
+//   The Shelly mJS HTTP client times out if it doesn't get a response, and
+//   _pushPending stays set for that tick -- effectively skipping a push.
+//   With threshold=3 a single such skip during the 10 s flush window was
+//   enough to trip the watchdog. 5 s provides adequate margin without
+//   delaying detection of a genuine Shelly disconnect (>> 5 s silence).
+#define SHELLY_ERROR_THRESHOLD   5
 
 // Startup grace for the Shelly watchdog (ms).
 // When the ESP32 boots after the Shelly is already running, the softAP takes
