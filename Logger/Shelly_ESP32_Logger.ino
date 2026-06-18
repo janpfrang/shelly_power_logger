@@ -2,36 +2,34 @@
  * Shelly_ESP32_Logger.ino  v3
  * ============================
  *
- * Main sketch for the Shelly Plug S MTR Gen3 + ESP32 + SD power logger.
+ * Changes vs. v2
+ * --------------
+ *   CHANGED  WebPortal webPortal(...) -- &rtc passed as third argument so
+ *            WebPortal can serve POST /api/set_rtc and display RTC time
+ *            on the home page and settings page.
+ *   UNCHANGED: everything else
  *
  * Changes vs. v1
  * --------------
  *   ADDED    #include "PowerMonitor.h"
  *   ADDED    PowerMonitor powerMonitor   (no dependencies)
- *   ADDED    powerMonitor.begin() in setup() (replaces the bare
- *            pinMode(PIN_VSUPPLY, INPUT) placeholder -- Req 13 now implemented)
- *   ADDED    handlePowerLoss()  -- terminal graceful-shutdown sequence
+ *   ADDED    powerMonitor.begin() in setup()
+ *   ADDED    handlePowerLoss()
  *   CHANGED  loop() -- power-loss guard runs first, every iteration
  *   ADDED    #include <RTClib.h> + #include <Wire.h>
  *   ADDED    RTC_DS3231 rtc  (no dependencies)
  *   CHANGED  Logger logger   (now takes &rtc as second argument)
  *   ADDED    Wire.begin() + rtc.begin() + lostPower check in setup()
  *   ADDED    shelly.beginStartupGrace() after webPortal.begin()
- *   UNCHANGED: everything else (Shelly push path, SD logic, OTA, web UI)
- *
- * Changes vs. PZEM_Logger.ino  v4 (kept for history)
- * --------------------------------------------------
- *   REMOVED  #include (PZEM library)
- *   ADDED    ShellyClient shelly  (declared before logger)
- *   CHANGED  Logger logger        (now takes ShellyClient& in constructor)
- *   CHANGED  WebPortal webPortal  (now takes ShellyClient& as second arg)
  *
  * Object ownership model
  * ----------------------
  *   shelly       — owned here; receives data from WebPortal::handleShellyPush()
+ *   rtc          — owned here; passed by pointer to Logger and WebPortal
  *   logger       — owned here; reads cached data from shelly via pollIfDue()
  *   webPortal    — owned here; routes POST /api/shelly_push → shelly.ingest()
  *                              routes GET  /api/live         → logger getters
+ *                              routes POST /api/set_rtc      → rtc.adjust()  (v8)
  *   powerMonitor — owned here; reads the 9V rail on GPIO 35, flags power loss
  *
  * Power-loss handling (Req 13)
@@ -41,13 +39,6 @@
  *   handlePowerLoss(), which flushes the SD card, sheds load (Wi-Fi/LED off)
  *   to stretch the supercap hold-up, and idles until either mains returns
  *   (clean reboot) or the supercaps deplete (hardware brownout reset).
- *   See PowerMonitor.h for the full threshold/timing rationale.
- *
- *   NOTE: monitoring is naturally suspended during an OTA flash, because the
- *   multipart upload blocks inside webPortal.update().  That is safe: the OTA
- *   chunk handler already flushes the SD buffer before Update.begin(), so no
- *   samples are at risk, and a power loss mid-flash simply leaves the old
- *   firmware in place.
  *
  * Loop timing (approximate, single-core)
  * ---------------------------------------
@@ -59,7 +50,8 @@
  *
  * Required Arduino libraries (Library Manager)
  * ---------------------------------------------
- *   ArduinoJson  by Benoit Blanchon  (≥ v6.x)
+ *   ArduinoJson  by Benoit Blanchon  (>= v6.x)
+ *   RTClib       by Adafruit
  *   SD           (built-in)
  *   WiFi         (built-in ESP32)
  *   WebServer    (built-in ESP32)
@@ -79,13 +71,14 @@
 
 // ── Object instantiation order matters:
 //    ShellyClient has no dependencies.
-//    Logger depends on ShellyClient.
-//    WebPortal depends on both Logger and ShellyClient.
+//    RTC_DS3231 has no dependencies.
+//    Logger depends on ShellyClient and optionally on RTC_DS3231.
+//    WebPortal depends on Logger, ShellyClient, and optionally on RTC_DS3231.
 //    PowerMonitor has no dependencies.
 ShellyClient shelly;
 RTC_DS3231   rtc;
-Logger       logger(shelly, &rtc);   // &rtc: optional pointer; nullptr = RTC absent
-WebPortal    webPortal(logger, shelly);
+Logger       logger(shelly, &rtc);      // &rtc: optional pointer; nullptr = RTC absent
+WebPortal    webPortal(logger, shelly, &rtc);  // v8: rtc passed so /api/set_rtc works
 StatusLed    statusLed;
 PowerMonitor powerMonitor;
 
@@ -96,7 +89,7 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println();
-  Serial.println("=== Shelly ESP32 Logger v2 Start ===");
+  Serial.println("=== Shelly ESP32 Logger v3 Start ===");
 
   // 9V-rail monitor on GPIO 35 (Req 13). begin() configures the ADC and
   // starts the startup grace window, so it must run early.
@@ -109,16 +102,13 @@ void setup() {
     Serial.println("[Setup]          Logging laeuft weiter, CSV zeigt 'RTC_NOT_SET'.");
   } else if (rtc.lostPower()) {
     Serial.println("[Setup] WARNUNG: DS3231 Batterie leer / Uhrzeit nicht gesetzt!");
-    Serial.println("[Setup]          Bitte RTC kalibrieren. CSV zeigt 'RTC_NOT_SET'.");
+    Serial.println("[Setup]          Bitte RTC kalibrieren via Settings > Set RTC Time.");
   } else {
     DateTime now = rtc.now();
-    Serial.printf("[Setup] RTC OK -- %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+    Serial.printf("[Setup] RTC OK -- %04d-%02d-%02d %02d:%02d:%02d\n",
                   now.year(), now.month(), now.day(),
                   now.hour(), now.minute(), now.second());
   }
-
-  // GPIO 33 (manual-reset button, Req 25/26) is not configured here:
-  // there is no code that reads it yet. Configure it when the handler exists.
 
   statusLed.begin();
   statusLed.setOk(false);   // error blink until init completes
@@ -128,28 +118,20 @@ void setup() {
     ensureLogHeader();
   }
 
-  if (!webPortal.begin()) {   // starts AP+STA WiFi and HTTP server
-    // softAP() failed — without the web server the device cannot receive
-    // Shelly pushes or serve the UI. Make the failure visible instead of
-    // continuing silently with a dead server.
+  if (!webPortal.begin()) {
     Serial.println("[Setup] FEHLER: WebPortal konnte nicht gestartet werden!");
     statusLed.setOk(false);
   }
 
-  // Start the boot-order grace window: if the Shelly is already running
-  // when the ESP32 boots, its WiFi client needs up to ~10 s to re-associate
-  // with the freshly-started AP. beginStartupGrace() suppresses the
-  // 3 s watchdog for SHELLY_STARTUP_GRACE_MS so the UI doesn't lock on '--'.
+  // Start the boot-order grace window for the Shelly watchdog.
   shelly.beginStartupGrace();
 
-  Serial.println("[Setup] fertig — warte auf ersten Shelly-Push...");
+  Serial.println("[Setup] fertig -- warte auf ersten Shelly-Push...");
   statusLed.setOk(false);   // stays red until first push arrives
 }
 
 void loop() {
-  // 0. Power-loss guard FIRST. If the 9V rail has collapsed, persist data
-  //    and shut down gracefully before anything else can touch the SD card.
-  //    handlePowerLoss() never returns.
+  // 0. Power-loss guard FIRST.
   powerMonitor.update();
   if (powerMonitor.isPowerLost()) {
     handlePowerLoss();
@@ -161,63 +143,43 @@ void loop() {
   // 2. Flush ring buffer to SD on schedule
   logger.flushIfDue();
 
-  // 3. Service HTTP requests (this is where handleShellyPush() fires,
-  //    updating shelly's cache, which pollIfDue() will read next tick)
+  // 3. Service HTTP requests
   webPortal.update();
 
-  // 4. Update LED — reflects logger.ok() = shellyOk() && sdOk()
-  //    idempotent: no flicker if state hasn't changed
+  // 4. Update LED -- reflects logger.ok() = shellyOk() && sdOk()
   statusLed.setOk(logger.ok());
   statusLed.update();
 }
 
 // ── Terminal graceful shutdown on mains loss (Req 13) ───────────────────────
-//
-// Called once, from loop(), when PowerMonitor latches a sustained
-// under-voltage. Does NOT return under normal circumstances:
-//   • genuine power loss  -> idle until the supercaps deplete and the ESP32
-//                            brownout detector resets the chip (data already
-//                            on the SD card);
-//   • mains comes back    -> reboot cleanly via ESP.restart() to resume
-//                            logging (the startup grace window re-arms).
 void handlePowerLoss() {
   Serial.println();
   Serial.println("[Power] *** SPANNUNGSABFALL erkannt (<7.35V) -- Notabschaltung ***");
 
-  // 1. Persist everything still in RAM. This is the whole point of Req 13.
-  //    flushToSD() is best-effort: if the SD has already failed there is
-  //    nothing more we can do, but normally the buffer holds <= 10 samples
-  //    and writes in well under 500 ms.
   uint32_t t0 = millis();
   logger.flushToSD();
   Serial.printf("[Power] SD-Flush abgeschlossen in %lu ms\n",
                 (unsigned long)(millis() - t0));
 
-  // 2. Shed load to stretch the supercap hold-up window. Killing the Wi-Fi
-  //    radio saves ~80-120 mA, which buys several extra seconds before
-  //    brownout — far more than the flush actually needed.
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
   digitalWrite(PIN_LED, LOW);
 
   Serial.println("[Power] Logging gestoppt. Warte auf Brownout oder Netz-Rueckkehr...");
 
-  // 3. Terminal idle with mains-recovery escape hatch.
-  //    With Wi-Fi off the ADC1 noise floor is much lower, so the rail reading
-  //    here is cleaner than during normal operation.
   uint8_t recoverCount = 0;
   for (;;) {
     delay(100);
     uint32_t railMv = powerMonitor.readRailMilliVolts();
 
     if (railMv > POWER_THRESHOLD_HIGH_MV) {
-      if (++recoverCount >= POWER_RECOVER_COUNT) {   // ~1 s sustained above clear
+      if (++recoverCount >= POWER_RECOVER_COUNT) {
         Serial.println("[Power] Netz wieder stabil -- Neustart zur Wiederaufnahme.");
         delay(50);
         ESP.restart();
       }
     } else {
-      recoverCount = 0;   // not yet stable; keep waiting (brownout will reset)
+      recoverCount = 0;
     }
   }
 }
