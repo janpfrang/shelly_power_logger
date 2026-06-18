@@ -1,9 +1,21 @@
 /*
- * Logger.h v7  (Shelly + ESP32 + OTA-aware + DS3231 RTC)
- * ==========================================
+ * Logger.h v8  (Shelly + ESP32 + OTA-aware + DS3231 RTC + batch drain)
+ * =====================================================================
  *
- * Changes vs. v5
+ * Changes vs. v7
  * --------------
+ *   CHANGED  pollIfDue() — drains ShellyClient pending queue
+ *              When the Shelly sends a startup batch ({"batch":[…]}),
+ *              ShellyClient::ingestBatch() queues up to 10 pre-connection
+ *              samples.  pollIfDue() now checks hasPendingSamples() first:
+ *              if samples are pending it consumes one per tick (respecting
+ *              _pollIntervalMs) and back-dates both millis_ts and unix_ts
+ *              using nextPendingMsAgo() so the CSV timestamps reflect when
+ *              the Shelly actually took the measurement, not when the ESP32
+ *              processed it.  Normal single-sample operation is unchanged.
+ *
+ * Changes vs. v5 (kept for history)
+ * ----------------------------------
  *   ADDED  _otaInProgress flag (bool, default false)
  *   ADDED  setOtaInProgress(bool)  -- called by WebPortal OTA handlers
  *   ADDED  isOtaInProgress()       -- read by WebPortal for /api/live response
@@ -139,23 +151,26 @@ public:
 
   // -- Called from loop() every iteration -----------------------------------
   //
-  // pollIfDue() used to call _pzem.voltage() etc. synchronously.
-  // Now it reads the last value cached by ShellyClient::ingest().
-  // The "poll interval" is still honoured -- we don't push a sample to the
-  // ring-buffer more often than _pollIntervalMs even if the Shelly pushes
-  // faster (it shouldn't, but belt-and-suspenders).
+  // Two operating modes, selected automatically:
+  //
+  //   A. BATCH DRAIN (startup)
+  //      When the Shelly sends a {"batch":[…]} on first connection,
+  //      ShellyClient::ingestBatch() fills a pending queue.  Each call
+  //      to pollIfDue() consumes one sample from that queue, back-dating
+  //      millis_ts and unix_ts so CSV rows carry the time the Shelly
+  //      actually took the measurement.  The poll-interval timer is
+  //      still honoured so the ring buffer fills at a controlled rate.
+  //
+  //   B. NORMAL (steady state)
+  //      Reads the latest cached value from ShellyClient, unchanged
+  //      from v7.
   void pollIfDue() {
-    // Suspend all sampling while a firmware update is being written.
-    // The Shelly watchdog will trip (expected -- see header note).
     if (_otaInProgress) return;
 
     uint32_t now = millis();
     if (now - _lastPollMs < _pollIntervalMs) return;
     _lastPollMs = now;
 
-    // If the Shelly watchdog has timed out or data is not yet valid,
-    // do not push a sample -- just update live display fields to NAN so
-    // the web UI shows "--" and the LED turns red.
     if (!_shelly.shellyOk() || !_shelly.hasData()) {
       _lastVoltage = NAN;
       _lastPower   = NAN;
@@ -163,19 +178,50 @@ public:
       return;
     }
 
+    // ── Mode A: drain one pending batch sample ────────────────────────────
+    if (_shelly.hasPendingSamples()) {
+      int32_t msAgo = _shelly.nextPendingMsAgo();
+      _shelly.consumePendingSample();     // advances _latest in ShellyClient
+
+      float V  = _shelly.getVoltage();
+      float P  = _shelly.getPower();
+      float PF = _shelly.getPfApparent();
+
+      _lastVoltage = V;
+      _lastPower   = P;
+      _lastPf      = PF;
+
+      if (P >= _powerThresholdW) {
+        // Back-date millis_ts: subtract how long ago the Shelly took this sample.
+        uint32_t millis_backdated = (msAgo < (int32_t)now)
+                                    ? (now - (uint32_t)msAgo)
+                                    : 0;
+
+        // Back-date unix_ts by the same offset (integer seconds).
+        uint32_t uts = 0;
+        if (_rtc != nullptr) {
+          uint32_t nowUts = (uint32_t)_rtc->now().unixtime();
+          uint32_t secsAgo = (uint32_t)(msAgo / 1000);
+          uts = (nowUts > secsAgo) ? (nowUts - secsAgo) : 0;
+        }
+
+        pushSample({ millis_backdated, uts, V, P, PF });
+        Serial.printf("[Logger] batch sample (-%lu ms ago): V=%.1f P=%.1f\n",
+                      (unsigned long)msAgo, V, P);
+      }
+      return;
+    }
+
+    // ── Mode B: normal single-sample path (unchanged from v7) ─────────────
     float V  = _shelly.getVoltage();
     float P  = _shelly.getPower();
     float PF = _shelly.getPfApparent();
 
-    // Update live-display cache (shown in /api/live regardless of threshold)
     _lastVoltage = V;
     _lastPower   = P;
     _lastPf      = PF;
 
-    // Apply logging threshold (Req 8): only store sample if P >= threshold
     if (P >= _powerThresholdW) {
-      // Capture wall-clock time from DS3231. Returns 0 when RTC is absent
-      // or has lost power -- CSV writes 'RTC_NOT_SET' for those rows.
       uint32_t uts = (_rtc != nullptr) ? (uint32_t)_rtc->now().unixtime() : 0;
       pushSample({ now, uts, V, P, PF });
     }
