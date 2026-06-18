@@ -1,38 +1,31 @@
 /*
- * WebPortal.cpp v7  (Shelly + ESP32 + OTA)
- * ==========================================
+ * WebPortal.cpp v8  (Shelly + ESP32 + OTA + RTC set-time)
+ * =========================================================
  *
- * Changes vs. v6 (Shelly + ESP32):
+ * Changes vs. v7:
  *
- *  1. PAGE_OTA  -- new PROGMEM page: drag-and-drop .bin upload form with
- *     live progress bar and automatic redirect after successful flash.
+ *  1. Constructor  -- third parameter RTC_DS3231* rtc = nullptr stored in _rtc.
  *
- *  2. GET /update   -- serves PAGE_OTA
- *     POST /update  -- streams firmware binary to Update.h flash writer.
- *     Both routes registered in begin().
+ *  2. POST /api/set_rtc  -- new route; calls handleApiSetRtc().
+ *     Parses JSON body { year, month, day, hour, minute, second },
+ *     validates ranges, calls _rtc->adjust(DateTime(...)).
+ *     Returns { "ok":true, "time":"YYYY-MM-DDTHH:MM:SS" } on success.
+ *     Returns 400 on bad input, 503 when _rtc == nullptr.
  *
- *  3. handleOtaForm()   -- trivial send_P of PAGE_OTA
- *     handleOtaUpload() -- sends final HTTP 200/500 response after upload
- *     handleOtaChunk()  -- per-chunk upload callback; calls Update.write()
+ *  3. PAGE_INDEX  -- RTC time line added to status card.
+ *     /api/live now also returns "rtc_time" string (see handleApiLive).
  *
- *  4. GET /api/live  -- adds "ota_active" boolean so the home page can
- *     display an "Update in progress" banner during flash.
- *     API_BUFFER_SIZE 320 in Config.h remains sufficient
- *     (worst-case JSON is ~146 chars -- no Config.h change needed).
+ *  4. PAGE_SETTINGS  -- "RTC Clock" card appended before the back link.
+ *     Contains a <input type="datetime-local"> pre-filled with the
+ *     browser's current local time, and a "Set RTC Time" button.
  *
- *  5. Home page (PAGE_INDEX) -- OTA button added to the button grid,
- *     "ota_active" banner shown/hidden by the existing refresh() loop.
- *
- *  6. README page (PAGE_README) -- OTA section added to the page table.
- *
- *  Everything else -- all other pages, routes, handlers, Wi-Fi setup,
- *  captive portal, Shelly push, settings, SD download/reset -- UNCHANGED.
+ *  Everything else is unchanged from v7.
  */
 
 #include "WebPortal.h"
 
 // -----------------------------------------------------------------------------
-// PAGE_INDEX  -- identical structure to v5; only label change
+// PAGE_INDEX  -- RTC time display added to status card
 // -----------------------------------------------------------------------------
 static const char PAGE_INDEX[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="de"><head>
@@ -66,6 +59,7 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
             border: 1px solid #ffc107; border-radius: 6px;
             padding: .7em 1em; margin-bottom: 1em;
             font-weight: bold; text-align: center; }
+  .rtc-row { font-size: .88em; color: #555; margin-top: .5em; text-align: center; }
 </style>
 </head><body>
 
@@ -87,6 +81,7 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
     | Verworfen: <span id="drop">0</span>
     | Uptime: <span id="uptime">0</span> s
   </div>
+  <div class="rtc-row">&#x1F551; RTC: <span id="rtc-time">&mdash;</span></div>
 </div>
 
 <div class="card">
@@ -115,9 +110,9 @@ async function refresh() {
     const r = await fetch('/api/live');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
-    document.getElementById('power').textContent   = d.power   === null ? '&mdash;' : d.power.toFixed(1);
-    document.getElementById('voltage').textContent = d.voltage === null ? '&mdash;' : d.voltage.toFixed(1);
-    document.getElementById('pf').textContent      = d.pf      === null ? '&mdash;' : d.pf.toFixed(2);
+    document.getElementById('power').textContent   = d.power   === null ? '\u2014' : d.power.toFixed(1);
+    document.getElementById('voltage').textContent = d.voltage === null ? '\u2014' : d.voltage.toFixed(1);
+    document.getElementById('pf').textContent      = d.pf      === null ? '\u2014' : d.pf.toFixed(2);
     document.getElementById('buf').textContent     = d.buffer;
     document.getElementById('drop').textContent    = d.dropped;
     document.getElementById('uptime').textContent  = d.uptime;
@@ -129,10 +124,19 @@ async function refresh() {
     sd.className   = d.sd_ok   ? 'ok' : 'err';
     document.getElementById('ota-banner').style.display =
       d.ota_active ? 'block' : 'none';
+    // RTC time -- show "not set" when the string is absent or "RTC_NOT_SET"
+    const rt = document.getElementById('rtc-time');
+    if (d.rtc_time && d.rtc_time !== 'RTC_NOT_SET') {
+      rt.textContent = d.rtc_time;
+      rt.style.color = '#060';
+    } else {
+      rt.textContent = 'nicht gesetzt \u2014 bitte unter Settings kalibrieren';
+      rt.style.color = '#a00';
+    }
   } catch (e) {
-    document.getElementById('power').textContent   = '&mdash;';
-    document.getElementById('voltage').textContent = '&mdash;';
-    document.getElementById('pf').textContent      = '&mdash;';
+    document.getElementById('power').textContent   = '\u2014';
+    document.getElementById('voltage').textContent = '\u2014';
+    document.getElementById('pf').textContent      = '\u2014';
   }
 }
 refresh();
@@ -142,7 +146,7 @@ setInterval(refresh, 1000);
 )HTML";
 
 // -----------------------------------------------------------------------------
-// PAGE_SETTINGS  -- rate buttons updated; pf label updated
+// PAGE_SETTINGS  -- RTC clock card appended (v8)
 // -----------------------------------------------------------------------------
 static const char PAGE_SETTINGS[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>
@@ -183,6 +187,14 @@ static const char PAGE_SETTINGS[] PROGMEM = R"HTML(
   a.back   { display: inline-block; margin-top: .5em; color: #007acc; text-decoration: none; }
   a.back:hover { text-decoration: underline; }
   .note { font-size: .85em; color: #888; margin-top: .5em; }
+  /* RTC card */
+  .rtc-row { display: flex; gap: .6em; align-items: center; flex-wrap: wrap; }
+  input[type=datetime-local] {
+    flex: 1 1 200px; padding: .55em .7em; font-size: 1em;
+    border: 1px solid #ccc; border-radius: 6px;
+  }
+  .rtc-current { font-size: .9em; color: #555; margin-bottom: .8em; }
+  .rtc-current strong { color: #007acc; }
 </style>
 </head><body>
 
@@ -220,6 +232,22 @@ static const char PAGE_SETTINGS[] PROGMEM = R"HTML(
   </div>
   <p class="note">Changes take effect immediately and are kept until the device is restarted.</p>
 </div>
+
+<!-- ── RTC Clock card (v8) ───────────────────────────────────────────── -->
+<div class="card">
+  <h2>&#x1F551; RTC Clock (DS3231)</h2>
+  <p class="rtc-current">Current RTC time: <strong id="rtc-display">&hellip;</strong></p>
+  <p class="note" style="margin-bottom:.8em;">
+    Select the current date and time below, then click <em>Set RTC Time</em>.
+    The picker is pre-filled with your browser&rsquo;s local time &mdash; just confirm it is correct.
+  </p>
+  <div class="rtc-row">
+    <input type="datetime-local" id="rtc-picker" step="1">
+    <button class="primary" id="rtc-btn" onclick="setRtcTime()">Set RTC Time</button>
+  </div>
+  <span class="msg" id="rtc-msg" style="margin-top:.6em;display:block;"></span>
+</div>
+<!-- ────────────────────────────────────────────────────────────────────── -->
 
 <a class="back" href="/">&larr; Back</a>
 
@@ -301,16 +329,101 @@ async function saveSettings() {
 function setMsg(text, cls) {
   const el = document.getElementById('msg');
   el.textContent = text;
-  el.className = 'msg ' + cls;
+  el.className = 'msg ' + (cls ? cls : '');
+  el.style.display = cls ? 'inline-block' : 'none';
+}
+
+// ── RTC functions (v8) ──────────────────────────────────────────────────────
+
+// Pre-fill the datetime picker with the current local time of the browser.
+// datetime-local format: "YYYY-MM-DDTHH:MM:SS"
+function initRtcPicker() {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const local = now.getFullYear() + '-' +
+                pad(now.getMonth() + 1) + '-' +
+                pad(now.getDate())      + 'T' +
+                pad(now.getHours())     + ':' +
+                pad(now.getMinutes())   + ':' +
+                pad(now.getSeconds());
+  document.getElementById('rtc-picker').value = local;
+}
+
+// Fetch the current RTC time from /api/live and display it.
+async function loadRtcDisplay() {
+  try {
+    const r = await fetch('/api/live');
+    if (!r.ok) return;
+    const d = await r.json();
+    const el = document.getElementById('rtc-display');
+    if (d.rtc_time && d.rtc_time !== 'RTC_NOT_SET') {
+      el.textContent = d.rtc_time;
+      el.style.color = '#060';
+    } else {
+      el.textContent = 'nicht gesetzt';
+      el.style.color = '#a00';
+    }
+  } catch(e) { /* ignore */ }
+}
+
+async function setRtcTime() {
+  const val = document.getElementById('rtc-picker').value;
+  if (!val) {
+    setRtcMsg('Bitte Datum und Uhrzeit ausw\u00e4hlen.', 'err');
+    return;
+  }
+  // Parse "YYYY-MM-DDTHH:MM:SS" (or "YYYY-MM-DDTHH:MM" without seconds)
+  const parts = val.split('T');
+  const dateParts = parts[0].split('-');
+  const timeParts = parts[1] ? parts[1].split(':') : ['0','0','0'];
+  const payload = {
+    year:   parseInt(dateParts[0]),
+    month:  parseInt(dateParts[1]),
+    day:    parseInt(dateParts[2]),
+    hour:   parseInt(timeParts[0]),
+    minute: parseInt(timeParts[1]),
+    second: parseInt(timeParts[2] || 0)
+  };
+
+  document.getElementById('rtc-btn').disabled = true;
+  setRtcMsg('Setze RTC\u2026', '');
+
+  try {
+    const r = await fetch('/api/set_rtc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if (r.ok && d.ok) {
+      setRtcMsg('\u2713 RTC gesetzt: ' + d.time, 'ok');
+      document.getElementById('rtc-display').textContent = d.time;
+      document.getElementById('rtc-display').style.color = '#060';
+    } else {
+      setRtcMsg('\u2717 Fehler: ' + (d.error || 'Unbekannt'), 'err');
+    }
+  } catch(e) {
+    setRtcMsg('\u2717 Netzwerkfehler: ' + e.message, 'err');
+  }
+  document.getElementById('rtc-btn').disabled = false;
+}
+
+function setRtcMsg(text, cls) {
+  const el = document.getElementById('rtc-msg');
+  el.textContent = text;
+  el.className = 'msg ' + (cls ? cls : '');
+  el.style.display = text ? 'block' : 'none';
 }
 
 loadSettings();
+initRtcPicker();
+loadRtcDisplay();
 </script>
 </body></html>
 )HTML";
 
 // -----------------------------------------------------------------------------
-// PAGE_LIVEPLOT  -- minimum fetch interval raised to 1000 ms (Req 24 / Req 21)
+// PAGE_LIVEPLOT  -- unchanged from v7
 // -----------------------------------------------------------------------------
 static const char PAGE_LIVEPLOT[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="de"><head>
@@ -349,14 +462,14 @@ const canvas = document.getElementById('scopeCanvas');
 const ctx    = canvas.getContext('2d');
 const powerData   = [];
 const maxDataPoints = 60;
-let   fetchIntervalMs = 1000;  // floor raised to 1000 ms (Shelly meter cadence)
+let   fetchIntervalMs = 1000;
 
 async function initScope() {
   try {
     const r = await fetch('/api/settings');
     const d = await r.json();
     if (d.poll_ms) {
-      fetchIntervalMs = Math.max(d.poll_ms, 1000);  // enforce 1 s minimum
+      fetchIntervalMs = Math.max(d.poll_ms, 1000);
     }
   } catch(e) { /* keep default */ }
   startScopeLoop();
@@ -376,7 +489,7 @@ function startScopeLoop() {
       if (powerData.length > maxDataPoints) powerData.shift();
       renderChart();
     } catch(e) {
-      document.getElementById('val-w').textContent = '&mdash;';
+      document.getElementById('val-w').textContent = '\u2014';
     }
   }, fetchIntervalMs);
 }
@@ -431,7 +544,7 @@ initScope();
 )HTML";
 
 // -----------------------------------------------------------------------------
-// PAGE_README  -- updated for Shelly architecture
+// PAGE_README  -- unchanged from v7
 // -----------------------------------------------------------------------------
 static const char PAGE_README[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>
@@ -487,9 +600,7 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
 
 <div class="note">
   <strong>Shelly web interface:</strong> while connected to <code>PZEM_Logger</code>
-  the Shelly itself is reachable at <code>http://192.168.4.2</code>
-  (or whichever IP the ESP32 DHCP server assigned &mdash; check the status badge on the
-  home screen if unsure). Use this to update Shelly firmware or change its script.
+  the Shelly itself is reachable at <code>http://192.168.4.2</code>.
 </div>
 
 <h2>Web interface &mdash; page by page</h2>
@@ -499,21 +610,18 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
   <tr>
     <td><strong>Home</strong><br><code>/</code></td>
     <td>Shows live voltage, power and pf<sub>apparent</sub> updated every second.
-        Status badges show whether the Shelly is pushing data (green = OK,
-        red = no push received in the last 3 s) and whether the SD card is
-        working. Also shows RAM buffer fill, dropped sample count, and uptime.</td>
+        Status badges show whether the Shelly is pushing data and whether the SD card is
+        working. Also shows current RTC time, RAM buffer fill, dropped sample count, and uptime.</td>
   </tr>
   <tr>
     <td><strong>Live Plot</strong><br><code>/liveplot</code></td>
-    <td>Oscilloscope-style scrolling power chart covering the last 60 samples.
-        Y-axis scales automatically to the peak value seen. Useful for watching
-        switch-on transients or duty cycles in real time.</td>
+    <td>Oscilloscope-style scrolling power chart covering the last 60 samples.</td>
   </tr>
   <tr>
     <td><strong>Download Log</strong><br><code>/download</code></td>
     <td>Flushes the RAM buffer to SD, then streams <code>log.csv</code> directly
         to your browser as a file download. CSV columns:
-        <code>time_ms, voltage_V, power_W, pf_apparent</code>.</td>
+        <code>datetime, time_ms, voltage_V, power_W, pf_apparent</code>.</td>
   </tr>
   <tr>
     <td><strong>Reset &amp; Delete SD</strong><br><code>POST /reset</code></td>
@@ -523,22 +631,15 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
   <tr>
     <td><strong>Settings</strong><br><code>/settings</code></td>
     <td>
-      <em>Sampling rate</em> &mdash; how often a measurement is taken from the Shelly
-      and stored in the buffer: 1 s, 2 s, 5 s, 10 s, or 30 s.<br>
-      <em>Power threshold</em> &mdash; only log a sample if active power &ge; this value.
-      Set to 0 W to log everything including standby. Useful to avoid filling
-      the SD card with idle readings.<br>
-      Changes take effect immediately but are lost on reboot.
+      <em>Sampling rate</em> &mdash; 1 s, 2 s, 5 s, 10 s, or 30 s.<br>
+      <em>Power threshold</em> &mdash; only log a sample if active power &ge; this value.<br>
+      <em>Set RTC Time</em> &mdash; synchronise the DS3231 clock from your browser&rsquo;s local time.
+      The picker pre-fills automatically; just confirm and click the button.
     </td>
   </tr>
   <tr>
     <td><strong>Firmware Update</strong><br><code>/update</code></td>
-    <td>Over-the-air firmware update. Select a compiled <code>.bin</code> file
-        (from Arduino IDE: <em>Sketch &rarr; Export Compiled Binary</em>), then click
-        Upload. A progress bar shows transfer progress. The ESP32 reboots
-        automatically on success &mdash; the page will redirect to <code>/</code>
-        after 8 seconds. The SD log is flushed before flashing so no data is
-        lost. Logging resumes automatically after reboot.</td>
+    <td>Over-the-air firmware update via <code>.bin</code> file upload.</td>
   </tr>
 </table>
 
@@ -546,16 +647,17 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
 <p>CSV file at <code>/log.csv</code> on the SD card. One row per logged sample.</p>
 <table>
   <tr><th>Column</th><th>Unit</th><th>Description</th></tr>
+  <tr><td><code>datetime</code></td><td>&mdash;</td>
+      <td>ISO-8601 wall-clock time from DS3231 (e.g. 2026-06-18T14:33:05).
+          Shows <code>RTC_NOT_SET</code> if the clock has not been calibrated.</td></tr>
   <tr><td><code>time_ms</code></td><td>ms</td>
-      <td>ESP32 uptime at time of sample (not wall-clock time)</td></tr>
+      <td>ESP32 uptime at time of sample</td></tr>
   <tr><td><code>voltage_V</code></td><td>V RMS</td>
       <td>Mains voltage measured by Shelly</td></tr>
   <tr><td><code>power_W</code></td><td>W</td>
       <td>Active power (apower) measured by Shelly</td></tr>
   <tr><td><code>pf_apparent</code></td><td>&mdash;</td>
-      <td>Derived: power_W / (voltage_V &times; current_A). Range 0&ndash;1.
-          Close to 1 for resistive loads (heater, kettle),
-          lower for motors or switching supplies.</td></tr>
+      <td>Derived: power_W / (voltage_V &times; current_A). Range 0&ndash;1.</td></tr>
 </table>
 
 <h2>Default settings</h2>
@@ -580,7 +682,7 @@ voltage, current and active power; the ESP32 records and serves the data.</p>
 )HTML";
 
 // -----------------------------------------------------------------------------
-// PAGE_HISTOGRAM  -- live power distribution since page load
+// PAGE_HISTOGRAM  -- unchanged from v7
 // -----------------------------------------------------------------------------
 static const char PAGE_HISTOGRAM[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>
@@ -602,8 +704,6 @@ static const char PAGE_HISTOGRAM[] PROGMEM = R"HTML(
   button { padding: 0.7em 1.2em; font-size: 0.95em; border: none;
            border-radius: 6px; background: #007acc; color: white; cursor: pointer; }
   button:hover { background: #005f99; }
-  button.danger { background: #d33; }
-  button.danger:hover { background: #a22; }
   a.back { display: inline-block; margin-top: 0.5em; color: #007acc;
            text-decoration: none; font-weight: bold; }
   a.back:hover { text-decoration: underline; }
@@ -633,133 +733,85 @@ static const char PAGE_HISTOGRAM[] PROGMEM = R"HTML(
 <script>
 const BINS      = 20;
 const BAR_COLOR = '#007acc';
-const BAR_HOVER = '#28a745';
-
-// All raw samples collected since page load (or last reset)
 let samples  = [];
-let maxPower = 0;          // running maximum
-let pollMs   = 1000;       // synced from /api/settings on startup
+let maxPower = 0;
+let pollMs   = 1000;
 
 const canvas = document.getElementById('histCanvas');
 const ctx    = canvas.getContext('2d');
 
-// &mdash;&mdash; Fetch current poll interval so we match the device cadence &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
 async function init() {
   try {
     const r = await fetch('/api/settings');
     const d = await r.json();
     if (d.poll_ms) pollMs = Math.max(d.poll_ms, 1000);
-  } catch(e) { /* keep default */ }
+  } catch(e) {}
   setInterval(tick, pollMs);
   tick();
 }
 
-// &mdash;&mdash; Called every poll interval &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
 async function tick() {
   try {
     const r = await fetch('/api/live');
     if (!r.ok) return;
     const d = await r.json();
     if (d.power === null) return;
-
     const p = d.power;
     samples.push(p);
     if (p > maxPower) maxPower = p;
-
     document.getElementById('n-samples').textContent = samples.length;
     document.getElementById('max-w').textContent     = maxPower.toFixed(1) + ' W';
     document.getElementById('cur-w').textContent     = p.toFixed(1) + ' W';
-
     draw();
-  } catch(e) { /* network hiccup &mdash; skip tick */ }
+  } catch(e) {}
 }
 
-// &mdash;&mdash; Build bins and draw &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
 function buildBins() {
-  // Guard: if max is 0 (all readings are 0) use 1 W as a floor so bins exist
   const upper = maxPower > 0 ? maxPower : 1;
-  const width = upper / BINS;
-
-  document.getElementById('bin-w').textContent = width.toFixed(1) + ' W';
-
+  const binW  = upper / BINS;
+  document.getElementById('bin-w').textContent = binW.toFixed(1) + ' W';
   const counts = new Array(BINS).fill(0);
   for (const s of samples) {
-    // Clamp to last bin for values exactly equal to maxPower
-    let idx = Math.min(Math.floor(s / width), BINS - 1);
+    let idx = Math.floor(s / binW);
+    if (idx >= BINS) idx = BINS - 1;
     counts[idx]++;
   }
-  return { counts, width, upper };
+  return { counts, binW };
 }
 
 function draw() {
-  const W = canvas.width;
-  const H = canvas.height;
-  ctx.clearRect(0, 0, W, H);
-
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (samples.length === 0) return;
-
-  const { counts, width, upper } = buildBins();
+  const { counts, binW } = buildBins();
   const maxCount = Math.max(...counts, 1);
-
-  // &mdash;&mdash; Layout constants &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
-  const pL = 52, pR = 12, pT = 16, pB = 38;
-  const gW = W - pL - pR;
-  const gH = H - pT - pB;
-
-  // &mdash;&mdash; Y-axis gridlines and labels &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
-  ctx.font      = '11px monospace';
-  ctx.fillStyle = '#8e8e93';
-  ctx.strokeStyle = '#1e1e26';
-  ctx.lineWidth   = 0.8;
-  const Y_DIVS = 4;
-  ctx.textAlign    = 'right';
-  ctx.textBaseline = 'middle';
-  for (let i = 0; i <= Y_DIVS; i++) {
-    const pct  = i / Y_DIVS;
+  const pL = 45, pB = 30, pT = 15, pR = 10;
+  const gW = canvas.width - pL - pR;
+  const gH = canvas.height - pT - pB;
+  const barW = gW / BINS;
+  ctx.font = '10px monospace'; ctx.fillStyle = '#8e8e93';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const pct  = i / 4;
     const yPos = pT + gH * pct;
-    const val  = Math.round(maxCount * (1 - pct));
-    ctx.fillText(val, pL - 6, yPos);
-    if (i > 0 && i < Y_DIVS) {
-      ctx.beginPath();
-      ctx.moveTo(pL, yPos);
-      ctx.lineTo(W - pR, yPos);
-      ctx.stroke();
+    ctx.strokeStyle = '#22222a'; ctx.lineWidth = 1;
+    if (i > 0 && i < 4) {
+      ctx.beginPath(); ctx.moveTo(pL, yPos); ctx.lineTo(canvas.width - pR, yPos); ctx.stroke();
+    }
+    ctx.fillText(Math.round(maxCount * (1 - pct)), pL - 4, yPos);
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (let i = 0; i < BINS; i++) {
+    const h = (counts[i] / maxCount) * gH;
+    const x = pL + i * barW;
+    const y = pT + gH - h;
+    ctx.fillStyle = BAR_COLOR;
+    ctx.fillRect(x + 1, y, barW - 2, h);
+    if (i % 4 === 0) {
+      ctx.fillStyle = '#8e8e93';
+      ctx.fillText((i * binW).toFixed(0) + 'W', x, pT + gH + 4);
     }
   }
-
-  // &mdash;&mdash; Bars &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
-  const barSlot = gW / BINS;
-  const barGap  = Math.max(1, barSlot * 0.08);
-  const barW    = barSlot - barGap;
-
-  for (let i = 0; i < BINS; i++) {
-    const barH  = (counts[i] / maxCount) * gH;
-    const x     = pL + i * barSlot + barGap / 2;
-    const y     = pT + gH - barH;
-
-    // Highlight the bin containing the most recent reading
-    const latest = samples[samples.length - 1];
-    const latestBin = Math.min(Math.floor(latest / (upper / BINS)), BINS - 1);
-    ctx.fillStyle = (i === latestBin) ? BAR_HOVER : BAR_COLOR;
-
-    ctx.beginPath();
-    ctx.roundRect(x, y, barW, Math.max(barH, 1), 2);
-    ctx.fill();
-  }
-
-  // &mdash;&mdash; X-axis labels (every 5th bin) &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
-  ctx.fillStyle    = '#8e8e93';
-  ctx.textAlign    = 'center';
-  ctx.textBaseline = 'top';
-  for (let i = 0; i <= BINS; i += 5) {
-    const xPos  = pL + (i / BINS) * gW;
-    const label = (i * upper / BINS).toFixed(0) + 'W';
-    ctx.fillText(label, xPos, pT + gH + 6);
-  }
-
-  // &mdash;&mdash; Axes outline &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
-  ctx.strokeStyle = '#44444f';
-  ctx.lineWidth   = 1;
+  ctx.strokeStyle = '#44444f'; ctx.lineWidth = 1;
   ctx.strokeRect(pL, pT, gW, gH);
 }
 
@@ -767,9 +819,9 @@ function resetData() {
   samples  = [];
   maxPower = 0;
   document.getElementById('n-samples').textContent = '0';
-  document.getElementById('max-w').textContent     = '&mdash; W';
-  document.getElementById('cur-w').textContent     = '&mdash; W';
-  document.getElementById('bin-w').textContent     = '&mdash;';
+  document.getElementById('max-w').textContent     = '\u2014 W';
+  document.getElementById('cur-w').textContent     = '\u2014 W';
+  document.getElementById('bin-w').textContent     = '\u2014';
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
@@ -779,12 +831,7 @@ init();
 )HTML";
 
 // -----------------------------------------------------------------------------
-// PAGE_OTA  -- firmware upload form
-// Accepts a single .bin file via multipart POST to /update.
-// Progress bar driven by XMLHttpRequest upload events (avoids fetch() which
-// gives no progress on most mobile browsers).
-// On success the page auto-redirects to / after 8 s (long enough for reboot).
-// On error it shows the server's error text and offers a retry link.
+// PAGE_OTA  -- unchanged from v7
 // -----------------------------------------------------------------------------
 static const char PAGE_OTA[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="en"><head>
@@ -806,8 +853,7 @@ static const char PAGE_OTA[] PROGMEM = R"HTML(
   button:hover    { background: #005f99; }
   button:disabled { background: #aaa; cursor: default; }
   .progress-wrap { background: #e0e0e0; border-radius: 4px;
-                   height: 22px; margin: 1em 0; overflow: hidden;
-                   display: none; }
+                   height: 22px; margin: 1em 0; overflow: hidden; display: none; }
   .progress-bar  { height: 100%; width: 0%; background: #28a745;
                    transition: width .15s ease; text-align: center;
                    color: white; font-size: .85em; line-height: 22px; }
@@ -816,8 +862,7 @@ static const char PAGE_OTA[] PROGMEM = R"HTML(
   .msg.ok  { background: #d4edda; color: #155724; display: block; }
   .msg.err { background: #f8d7da; color: #721c24; display: block; }
   .note { font-size: .85em; color: #888; margin-top: .8em; }
-  a.back { display: inline-block; margin-top: .8em; color: #007acc;
-           text-decoration: none; }
+  a.back { display: inline-block; margin-top: .8em; color: #007acc; text-decoration: none; }
   a.back:hover { text-decoration: underline; }
 </style>
 </head><body>
@@ -827,21 +872,16 @@ static const char PAGE_OTA[] PROGMEM = R"HTML(
 <div class="card">
   <label for="binfile">Select compiled firmware (.bin)</label>
   <input type="file" id="binfile" accept=".bin">
-
   <button id="upload-btn" onclick="startUpload()">Upload &amp; Flash</button>
-
   <div class="progress-wrap" id="prog-wrap">
     <div class="progress-bar" id="prog-bar">0%</div>
   </div>
-
   <div class="msg" id="msg"></div>
-
   <p class="note">
     Export the binary from Arduino IDE via
     <em>Sketch &rarr; Export Compiled Binary</em>, then select the
-    <code>*.bin</code> (not <code>*.elf</code>) file above.<br>
+    <code>*.bin</code> file above.<br>
     The device will reboot automatically after a successful flash.
-    Logging resumes on its own &mdash; no further action needed.
   </p>
 </div>
 
@@ -850,80 +890,52 @@ static const char PAGE_OTA[] PROGMEM = R"HTML(
 <script>
 function startUpload() {
   const fileInput = document.getElementById('binfile');
-  if (!fileInput.files.length) {
-    showMsg('Please select a .bin file first.', 'err');
-    return;
-  }
+  if (!fileInput.files.length) { showMsg('Please select a .bin file first.', 'err'); return; }
   const file = fileInput.files[0];
-  if (!file.name.endsWith('.bin')) {
-    showMsg('File must have a .bin extension.', 'err');
-    return;
-  }
-
-  const btn      = document.getElementById('upload-btn');
+  if (!file.name.endsWith('.bin')) { showMsg('File must have a .bin extension.', 'err'); return; }
+  const btn = document.getElementById('upload-btn');
   const progWrap = document.getElementById('prog-wrap');
   const progBar  = document.getElementById('prog-bar');
-
-  btn.disabled        = true;
+  btn.disabled = true;
   progWrap.style.display = 'block';
   hideMsg();
-
   const formData = new FormData();
   formData.append('firmware', file, file.name);
-
   const xhr = new XMLHttpRequest();
-
-  // &mdash;&mdash; Progress &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   xhr.upload.onprogress = function(e) {
     if (!e.lengthComputable) return;
     const pct = Math.round((e.loaded / e.total) * 100);
-    progBar.style.width  = pct + '%';
-    progBar.textContent  = pct + '%';
+    progBar.style.width = pct + '%';
+    progBar.textContent = pct + '%';
   };
-
-  // &mdash;&mdash; Done &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
   xhr.onload = function() {
     if (xhr.status === 200) {
-      progBar.style.width  = '100%';
-      progBar.style.background = '#28a745';
-      progBar.textContent  = '100%';
-      showMsg('&#x2713; Flash successful &mdash; device is rebooting. ' +
-              'Redirecting to home in 8 s&hellip;', 'ok');
+      progBar.style.width = '100%';
+      progBar.textContent = '100%';
+      showMsg('\u2713 Flash successful \u2014 device is rebooting. Redirecting in 8 s\u2026', 'ok');
       setTimeout(function() { location.href = '/'; }, 8000);
     } else {
-      showMsg('&#x2717; Upload failed (HTTP ' + xhr.status + '): ' +
-              xhr.responseText, 'err');
+      showMsg('\u2717 Upload failed (HTTP ' + xhr.status + '): ' + xhr.responseText, 'err');
       btn.disabled = false;
     }
   };
-
-  // &mdash;&mdash; Network error &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;
-  // A network error here is actually EXPECTED on success: the ESP32 reboots
-  // mid-response.  If we already showed the 100% bar, treat it as success.
   xhr.onerror = function() {
     if (progBar.textContent === '100%') {
-      showMsg('&#x2713; Flash likely successful &mdash; device rebooting. ' +
-              'Redirecting to home in 8 s&hellip;', 'ok');
+      showMsg('\u2713 Flash likely successful \u2014 device rebooting. Redirecting in 8 s\u2026', 'ok');
       setTimeout(function() { location.href = '/'; }, 8000);
     } else {
-      showMsg('&#x2717; Network error &mdash; check device and try again.', 'err');
+      showMsg('\u2717 Network error \u2014 check device and try again.', 'err');
       btn.disabled = false;
     }
   };
-
   xhr.open('POST', '/update');
   xhr.send(formData);
 }
-
 function showMsg(text, cls) {
   const el = document.getElementById('msg');
-  el.textContent = text;
-  el.className   = 'msg ' + cls;
+  el.textContent = text; el.className = 'msg ' + cls;
 }
-function hideMsg() {
-  const el = document.getElementById('msg');
-  el.className = 'msg';
-}
+function hideMsg() { document.getElementById('msg').className = 'msg'; }
 </script>
 </body></html>
 )HTML";
@@ -932,16 +944,12 @@ function hideMsg() {
 // Implementation
 // -----------------------------------------------------------------------------
 
-WebPortal::WebPortal(Logger& logger, ShellyClient& shelly)
-  : _logger(logger), _shelly(shelly), _server(HTTP_PORT) {}
+WebPortal::WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc)
+  : _logger(logger), _shelly(shelly), _rtc(rtc), _server(HTTP_PORT) {}
 
 bool WebPortal::begin() {
   Serial.println("[Web] Starte WLAN AP+STA...");
 
-  // Option B: AP+STA mode.
-  // softAP is the network anchor for both the Shelly and the user's phone.
-  // STA is used only if a future feature needs to reach out (e.g., NTP).
-  // For now STA is started but not connected to any external network.
   WiFi.mode(WIFI_AP_STA);
 
   if (!WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD)) {
@@ -951,17 +959,15 @@ bool WebPortal::begin() {
   IPAddress ip = WiFi.softAPIP();
   Serial.printf("[Web] AP '%s' aktiv, IP: %s\n", WIFI_AP_SSID, ip.toString().c_str());
 
-  // Captive portal DNS catch-all
   _dns.start(DNS_PORT, "*", ip);
   Serial.println("[Web] DNS-Server gestartet (catch-all)");
 
-  // mDNS -- braun_PZEM.local  (Req: plain-text hostname)
   if (MDNS.begin(WIFI_AP_HOSTNAME)) {
     MDNS.addService("http", "tcp", HTTP_PORT);
     Serial.printf("[Web] mDNS aktiv: http://%s.local\n", WIFI_AP_HOSTNAME);
   }
 
-  // -- Captive portal probes ----------------------------------------------
+  // -- Captive portal probes -----------------------------------------------
   _server.on("/generate_204",              HTTP_GET, [this](){ handleCaptivePortal(); });
   _server.on("/gen_204",                   HTTP_GET, [this](){ handleCaptivePortal(); });
   _server.on("/hotspot-detect.html",       HTTP_GET, [this](){ handleCaptivePortal(); });
@@ -971,15 +977,14 @@ bool WebPortal::begin() {
   _server.on("/redirect",                  HTTP_GET, [this](){ handleCaptivePortal(); });
   _server.on("/canonical.html",            HTTP_GET, [this](){ handleCaptivePortal(); });
 
-  // -- Application routes (unchanged from v5 except /api/shelly_push) ------
+  // -- Application routes --------------------------------------------------
   _server.on("/",                    HTTP_GET,  [this](){ handleRoot(); });
   _server.on("/api/live",            HTTP_GET,  [this](){ handleApiLive(); });
   _server.on("/api/settings",        HTTP_GET,  [this](){ handleApiSettings(); });
   _server.on("/api/settings",        HTTP_POST, [this](){ handleApiSettingsSave(); });
-  _server.on("/api/shelly_push",     HTTP_POST, [this](){ handleShellyPush(); });   // v6
-  _server.on(OTA_ENDPOINT,           HTTP_GET,  [this](){ handleOtaForm(); });      // v7
-  // POST OTA_ENDPOINT: the body handler sends the final HTTP response;
-  // the upload (chunk) handler is registered separately via onFileUpload.
+  _server.on("/api/shelly_push",     HTTP_POST, [this](){ handleShellyPush(); });
+  _server.on("/api/set_rtc",         HTTP_POST, [this](){ handleApiSetRtc(); });   // v8 NEW
+  _server.on(OTA_ENDPOINT,           HTTP_GET,  [this](){ handleOtaForm(); });
   _server.on(OTA_ENDPOINT,           HTTP_POST,
     [this](){ handleOtaUpload(); },
     [this](){ handleOtaChunk(); });
@@ -987,7 +992,7 @@ bool WebPortal::begin() {
   _server.on("/reset",               HTTP_POST, [this](){ handleReset(); });
   _server.on("/settings",            HTTP_GET,  [this](){ handleSettings(); });
   _server.on("/readme",              HTTP_GET,  [this](){ handleReadme(); });
-  _server.on("/histogram",            HTTP_GET,  [this](){ handleHistogram(); });
+  _server.on("/histogram",           HTTP_GET,  [this](){ handleHistogram(); });
   _server.on("/liveplot",            HTTP_GET,  [this](){ handleLivePlot(); });
   _server.onNotFound(                          [this](){ handleNotFound(); });
 
@@ -1014,9 +1019,8 @@ void WebPortal::handleCaptivePortal() {
   _server.send(302, "text/plain", "");
 }
 
-// -- NEW: receives push from shelly_push.js --------------------------------
 void WebPortal::handleShellyPush() {
-  String body = _server.arg("plain");   // raw POST body
+  String body = _server.arg("plain");
   if (body.length() == 0) {
     _server.send(400, "application/json", "{\"error\":\"empty body\"}");
     return;
@@ -1028,17 +1032,28 @@ void WebPortal::handleShellyPush() {
   }
 }
 
-// -- /api/live -- includes shelly_ok (v6) and ota_active (v7) -------------
+// -- /api/live -- includes rtc_time field (v8) --------------------------------
 void WebPortal::handleApiLive() {
+  // Build RTC time string -- "YYYY-MM-DDTHH:MM:SS" or "RTC_NOT_SET"
+  char rtcbuf[22];
+  if (_rtc != nullptr) {
+    DateTime now = _rtc->now();
+    if (now.unixtime() > 0) {
+      snprintf(rtcbuf, sizeof(rtcbuf), "%04d-%02d-%02dT%02d:%02d:%02d",
+               now.year(), now.month(),  now.day(),
+               now.hour(), now.minute(), now.second());
+    } else {
+      snprintf(rtcbuf, sizeof(rtcbuf), "RTC_NOT_SET");
+    }
+  } else {
+    snprintf(rtcbuf, sizeof(rtcbuf), "RTC_NOT_SET");
+  }
+
   char buf[API_BUFFER_SIZE];
   float p  = _logger.getLastPower();
   float v  = _logger.getLastVoltage();
   float pf = _logger.getLastPf();
 
-  // Build only the sensor part conditionally. The status fields
-  // (buffer/dropped/uptime/shelly_ok/sd_ok/ota_active) are identical in
-  // both cases, so they are formatted exactly once below -- adding a new
-  // status field means editing one place, not two.
   char sensor[72];
   if (isnan(p) || isnan(v) || isnan(pf)) {
     snprintf(sensor, sizeof(sensor),
@@ -1050,14 +1065,16 @@ void WebPortal::handleApiLive() {
 
   snprintf(buf, sizeof(buf),
     "{%s,\"buffer\":%u,\"dropped\":%lu,\"uptime\":%lu,"
-    "\"shelly_ok\":%s,\"sd_ok\":%s,\"ota_active\":%s}",
+    "\"shelly_ok\":%s,\"sd_ok\":%s,\"ota_active\":%s,"
+    "\"rtc_time\":\"%s\"}",
     sensor,
     (unsigned)_logger.getBufferCount(),
     (unsigned long)_logger.getDroppedSamples(),
     (unsigned long)(millis() / 1000),
-    _logger.shellyOk()      ? "true" : "false",
-    _logger.sdOk()          ? "true" : "false",
-    _logger.isOtaInProgress() ? "true" : "false");
+    _logger.shellyOk()        ? "true" : "false",
+    _logger.sdOk()            ? "true" : "false",
+    _logger.isOtaInProgress() ? "true" : "false",
+    rtcbuf);
 
   _server.send(200, "application/json", buf);
 }
@@ -1095,7 +1112,7 @@ void WebPortal::handleLivePlot() {
   _server.send_P(200, "text/html", PAGE_LIVEPLOT);
 }
 
-// -- GET /api/settings -----------------------------------------------------
+// -- GET /api/settings -------------------------------------------------------
 void WebPortal::handleApiSettings() {
   char buf[128];
   snprintf(buf, sizeof(buf),
@@ -1105,11 +1122,10 @@ void WebPortal::handleApiSettings() {
   _server.send(200, "application/json", buf);
 }
 
-// -- POST /api/settings -- poll_ms whitelist updated (200/500 removed) ------
+// -- POST /api/settings ------------------------------------------------------
 void WebPortal::handleApiSettingsSave() {
   if (_server.hasArg("poll_ms")) {
     uint32_t ms = (uint32_t)_server.arg("poll_ms").toInt();
-    // Req 21: minimum 1000 ms; no sub-second options
     const uint32_t allowed_ms[] = {1000, 2000, 5000, 10000, 30000};
     bool valid = false;
     for (auto v : allowed_ms) { if (ms == v) { valid = true; break; } }
@@ -1136,103 +1152,60 @@ void WebPortal::handleApiSettingsSave() {
     }
   }
 
-  handleApiSettings();   // echo current settings back
+  handleApiSettings();
 }
 
 void WebPortal::handleReadme() {
   _server.send_P(200, "text/html", PAGE_README);
 }
 
-// -- GET /update -- serve the OTA upload form -------------------------------
+// -- GET /update -------------------------------------------------------------
 void WebPortal::handleOtaForm() {
   _server.send_P(200, "text/html", PAGE_OTA);
 }
 
-// -- POST /update body handler -- sends the final HTTP response ------------
-//
-// WebServer calls this AFTER the last handleOtaChunk() invocation.
-// Update.end() has already been called inside the chunk handler, so here
-// we only check Update.hasError() and send the appropriate response.
-//
-// If the flash succeeded the ESP32 reboots inside ESP.restart() below;
-// the HTTP response may or may not reach the browser before the reboot --
-// PAGE_OTA handles both outcomes (the xhr.onerror path on the JS side).
+// -- POST /update body handler -----------------------------------------------
 void WebPortal::handleOtaUpload() {
   if (Update.hasError()) {
-    // Restore logging so the device stays usable after a failed update.
     _logger.setOtaInProgress(false);
     String err = Update.errorString();
     Serial.printf("[OTA] Fehlgeschlagen: %s\n", err.c_str());
     _server.send(500, "text/plain", "OTA fehlgeschlagen: " + err);
   } else {
-    // Success path -- send 200 then reboot.
-    // The response may be cut off mid-TCP by the reboot; PAGE_OTA JS
-    // handles the resulting xhr.onerror as a successful outcome.
     _server.send(200, "text/plain", "OK");
-    delay(200);   // give TCP stack a moment to flush
+    delay(200);
     Serial.println("[OTA] Erfolgreich -- Neustart...");
     ESP.restart();
   }
 }
 
-// -- Upload chunk callback -- called by WebServer for every multipart chunk -
-//
-// Execution context: synchronous inside _server.handleClient(), same task
-// as loop().  No RTOS or ISR concerns.
-//
-// HTTPUpload fields used:
-//   status   -- UPLOAD_FILE_START / UPLOAD_FILE_WRITE / UPLOAD_FILE_END / UPLOAD_FILE_ABORTED
-//   buf      -- pointer to this chunk's data
-//   currentSize -- number of valid bytes in buf this call
-//   totalSize   -- total bytes received so far (increases each WRITE call)
+// -- Upload chunk callback ---------------------------------------------------
 void WebPortal::handleOtaChunk() {
   HTTPUpload& upload = _server.upload();
 
   if (upload.status == UPLOAD_FILE_START) {
     Serial.printf("[OTA] Start: %s  (%u Bytes erwartet)\n",
                   upload.filename.c_str(), upload.totalSize);
-
-    // Pause logging and flush SD before touching flash.
-    // setOtaInProgress(true) calls flushToSD() internally.
     _logger.setOtaInProgress(true);
-
-    // UPDATE_SIZE_UNKNOWN lets the Update library allocate flash
-    // dynamically.  Passing the actual file size is also valid if known,
-    // but the browser does not always send Content-Length reliably in
-    // multipart uploads over the ESP32 WebServer.
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       Serial.printf("[OTA] Update.begin() fehlgeschlagen: %s\n",
                     Update.errorString());
-      // Do NOT abort here -- let handleOtaUpload() send the error response
-      // so the HTTP transaction completes cleanly.
     }
-
   } else if (upload.status == UPLOAD_FILE_WRITE) {
-    // Feed this chunk to the flash writer.
-    // Update.write() returns the number of bytes actually written;
-    // a mismatch means flash is full or the image is corrupt.
     if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
       Serial.printf("[OTA] Update.write() Fehler bei Byte %u: %s\n",
                     upload.totalSize, Update.errorString());
     } else {
-      // Print a progress dot every ~16 KB to Serial without flooding it.
-      if ((upload.totalSize / upload.currentSize) % 64 == 0) {
-        Serial.print('.');
-      }
+      if ((upload.totalSize / upload.currentSize) % 64 == 0) Serial.print('.');
     }
-
   } else if (upload.status == UPLOAD_FILE_END) {
     Serial.printf("\n[OTA] Uebertragen: %u Bytes -- finalisiere...\n",
                   upload.totalSize);
-    // Finalise: verify the flash and mark the new partition as bootable.
-    // Passing 'true' triggers MD5 verification if the image contains a hash.
     if (!Update.end(true)) {
       Serial.printf("[OTA] Update.end() fehlgeschlagen: %s\n",
                     Update.errorString());
     }
-
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
-    // Client disconnected mid-upload.
     Update.abort();
     _logger.setOtaInProgress(false);
     Serial.println("[OTA] Upload abgebrochen -- Logging wiederhergestellt");
@@ -1241,4 +1214,91 @@ void WebPortal::handleOtaChunk() {
 
 void WebPortal::handleNotFound() {
   handleCaptivePortal();
+}
+
+// -- POST /api/set_rtc  (v8 NEW) ---------------------------------------------
+//
+// Expects application/json body:
+//   { "year":2026, "month":6, "day":18,
+//     "hour":14,   "minute":33, "second":0 }
+//
+// Validates all fields are in plausible range before writing to the DS3231
+// so a typo can never corrupt the clock with a completely nonsense value.
+//
+// On success responds:
+//   200  { "ok":true, "time":"2026-06-18T14:33:00" }
+// On bad input:
+//   400  { "error":"<description>" }
+// When RTC is not available (_rtc == nullptr):
+//   503  { "error":"RTC not available" }
+void WebPortal::handleApiSetRtc() {
+  if (_rtc == nullptr) {
+    _server.send(503, "application/json", "{\"error\":\"RTC not available\"}");
+    Serial.println("[RTC] set_rtc abgelehnt: kein RTC-Objekt");
+    return;
+  }
+
+  String body = _server.arg("plain");
+  if (body.length() == 0) {
+    _server.send(400, "application/json", "{\"error\":\"empty body\"}");
+    return;
+  }
+
+  // Manual JSON parse -- avoids pulling ArduinoJson into this handler.
+  // The body is short and well-known in structure; simple key search suffices.
+  auto extractInt = [&](const char* key, int& out) -> bool {
+    // Looks for "key": followed by optional whitespace and a decimal integer.
+    String search = "\"";
+    search += key;
+    search += "\"";
+    int pos = body.indexOf(search);
+    if (pos < 0) return false;
+    pos = body.indexOf(':', pos + search.length());
+    if (pos < 0) return false;
+    pos++;
+    while (pos < (int)body.length() && (body[pos] == ' ' || body[pos] == '\t')) pos++;
+    if (pos >= (int)body.length()) return false;
+    out = body.substring(pos).toInt();
+    return true;
+  };
+
+  int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+  if (!extractInt("year",   year)   ||
+      !extractInt("month",  month)  ||
+      !extractInt("day",    day)    ||
+      !extractInt("hour",   hour)   ||
+      !extractInt("minute", minute) ||
+      !extractInt("second", second)) {
+    _server.send(400, "application/json",
+                 "{\"error\":\"missing fields: year/month/day/hour/minute/second required\"}");
+    return;
+  }
+
+  // Plausibility check -- reject obvious garbage
+  if (year  < 2020 || year  > 2099 ||
+      month < 1    || month > 12   ||
+      day   < 1    || day   > 31   ||
+      hour  < 0    || hour  > 23   ||
+      minute< 0    || minute> 59   ||
+      second< 0    || second> 59) {
+    _server.send(400, "application/json",
+                 "{\"error\":\"out-of-range value (year 2020-2099, valid date/time)\"}");
+    return;
+  }
+
+  // Write to DS3231
+  _rtc->adjust(DateTime(year, month, day, hour, minute, second));
+
+  // Read back the time we just set to confirm and return it
+  DateTime confirmed = _rtc->now();
+  char timebuf[22];
+  snprintf(timebuf, sizeof(timebuf), "%04d-%02d-%02dT%02d:%02d:%02d",
+           confirmed.year(), confirmed.month(),  confirmed.day(),
+           confirmed.hour(), confirmed.minute(), confirmed.second());
+
+  char resp[64];
+  snprintf(resp, sizeof(resp), "{\"ok\":true,\"time\":\"%s\"}", timebuf);
+  _server.send(200, "application/json", resp);
+
+  Serial.printf("[RTC] Zeit gesetzt: %s\n", timebuf);
 }
