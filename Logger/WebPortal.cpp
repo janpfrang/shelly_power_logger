@@ -921,7 +921,7 @@ function hideMsg() {
 // -----------------------------------------------------------------------------
 
 WebPortal::WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc)
-  : _logger(logger), _shelly(shelly), _server(HTTP_PORT) { (void)rtc; }
+  : _logger(logger), _shelly(shelly), _rtc(rtc), _server(HTTP_PORT) {}
 
 bool WebPortal::begin() {
   Serial.println("[Web] Starte WLAN AP+STA...");
@@ -977,6 +977,7 @@ bool WebPortal::begin() {
   _server.on("/readme",              HTTP_GET,  [this](){ handleReadme(); });
   _server.on("/histogram",            HTTP_GET,  [this](){ handleHistogram(); });
   _server.on("/liveplot",            HTTP_GET,  [this](){ handleLivePlot(); });
+  _server.on("/api/set_rtc",         HTTP_POST, [this](){ handleApiSetRtc(); });  // v8
   _server.onNotFound(                          [this](){ handleNotFound(); });
 
   _server.begin();
@@ -1241,6 +1242,60 @@ void WebPortal::handleOtaChunk() {
     _logger.setOtaInProgress(false);
     Serial.println("[OTA] Upload abgebrochen -- Logging wiederhergestellt");
   }
+}
+
+// -- POST /api/set_rtc -- set the DS3231 RTC time (NEW v8) ------------------
+//
+// Body (application/json):
+//   { "year":YYYY, "month":M, "day":D, "hour":H, "minute":M, "second":S }
+// Response 200: { "ok":true, "time":"YYYY-MM-DDTHH:MM:SS" }
+// Response 400: { "error":"..." }   -- missing or out-of-range fields
+// Response 503: { "error":"RTC not available" }  -- _rtc == nullptr
+void WebPortal::handleApiSetRtc() {
+  if (!_rtc) {
+    _server.send(503, "application/json", "{\"error\":\"RTC not available\"}");
+    return;
+  }
+
+  String body = _server.arg("plain");
+  if (body.length() == 0) {
+    _server.send(400, "application/json", "{\"error\":\"empty body\"}");
+    return;
+  }
+
+  StaticJsonDocument<128> doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    _server.send(400, "application/json", "{\"error\":\"JSON parse failed\"}");
+    return;
+  }
+
+  int y  = doc["year"]   | 0;
+  int mo = doc["month"]  | 0;
+  int d  = doc["day"]    | 0;
+  int h  = doc["hour"]   | 0;
+  int mi = doc["minute"] | 0;
+  int s  = doc["second"] | 0;
+
+  if (y < 2020 || y > 2099 ||
+      mo < 1   || mo > 12  ||
+      d  < 1   || d  > 31  ||
+      h  < 0   || h  > 23  ||
+      mi < 0   || mi > 59  ||
+      s  < 0   || s  > 59) {
+    _server.send(400, "application/json", "{\"error\":\"invalid or missing fields\"}");
+    return;
+  }
+
+  _rtc->adjust(DateTime(y, mo, d, h, mi, s));
+  Serial.printf("[RTC] Zeit gesetzt: %04d-%02d-%02d %02d:%02d:%02d\n",
+                y, mo, d, h, mi, s);
+
+  char resp[72];
+  snprintf(resp, sizeof(resp),
+           "{\"ok\":true,\"time\":\"%04d-%02d-%02dT%02d:%02d:%02d\"}",
+           y, mo, d, h, mi, s);
+  _server.send(200, "application/json", resp);
 }
 
 void WebPortal::handleNotFound() {
