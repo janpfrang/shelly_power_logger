@@ -177,7 +177,7 @@ public:
       return -1;
     }
 
-    if (!doc.containsKey("batch") || !doc["batch"].isArray()) {
+    if (!doc.containsKey("batch") || !doc["batch"].is<JsonArray>()) {
       Serial.println("[Shelly] batch: missing 'batch' array");
       _errorCount++;
       return -1;
