@@ -31,6 +31,14 @@ public:
   bool  shellyOk()      const { return _ok; }
   bool  hasData()       const { return _hasData; }
   uint8_t getErrorCount() const { return 0; }
+
+  // Batch-drain interface — always returns "no pending samples" in tests.
+  // Logger::pollIfDue() checks hasPendingSamples() first; returning false
+  // keeps the test double on the normal single-sample path, so all
+  // existing Logger tests exercise the same code paths as before.
+  bool    hasPendingSamples()  const { return false; }
+  int32_t nextPendingMsAgo()   const { return 0; }
+  bool    consumePendingSample()     { return false; }
 };
 
 // ── File stub (all methods no-ops; always evaluates to false) ─────────────────
