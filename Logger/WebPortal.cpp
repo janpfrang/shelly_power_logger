@@ -920,8 +920,8 @@ function hideMsg() {
 // Implementation
 // -----------------------------------------------------------------------------
 
-WebPortal::WebPortal(Logger& logger, ShellyClient& shelly)
-  : _logger(logger), _shelly(shelly), _server(HTTP_PORT) {}
+WebPortal::WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc)
+  : _logger(logger), _shelly(shelly), _server(HTTP_PORT) { (void)rtc; }
 
 bool WebPortal::begin() {
   Serial.println("[Web] Starte WLAN AP+STA...");
