@@ -161,10 +161,14 @@ public:
   //
   // Samples are queued in _pending[] in chronological order (index 0 =
   // oldest). consumePendingSample() drains them one per pollIfDue() tick.
+  //
+  // Implementation note: uses only StaticJsonDocument + the JsonProxy chain
+  // (doc["batch"][i]["v"].as<float>()) so the ArduinoJson v6 test stub
+  // compiles without DynamicJsonDocument, JsonArray, or JsonObject.
+  // The document size 768 B covers 10 samples × ~60 B + overhead on the
+  // real device (StaticJsonDocument lives on the stack; fine for ESP32).
   int ingestBatch(const String& body) {
-    // Batch payload is larger: 10 samples × ~60 bytes each + overhead = ~700 B
-    // Use DynamicJsonDocument to avoid blowing the stack.
-    DynamicJsonDocument doc(768);
+    StaticJsonDocument<768> doc;
     DeserializationError err = deserializeJson(doc, body);
 
     if (err) {
@@ -173,34 +177,33 @@ public:
       return -1;
     }
 
-    if (!doc.containsKey("batch") || !doc["batch"].is<JsonArray>()) {
+    if (!doc.containsKey("batch") || !doc["batch"].isArray()) {
       Serial.println("[Shelly] batch: missing 'batch' array");
       _errorCount++;
       return -1;
     }
 
-    JsonArray arr = doc["batch"].as<JsonArray>();
-    uint8_t  count = 0;
-    uint8_t  total = (uint8_t)arr.size();
-    if (total > BATCH_QUEUE_SIZE) { total = BATCH_QUEUE_SIZE; }
-
     // Clear any leftover pending queue from a previous (failed) batch
     _pendingCount = 0;
     _pendingHead  = 0;
 
-    for (uint8_t idx = 0; idx < total; idx++) {
-      JsonObject obj = arr[idx];
+    uint8_t total = (uint8_t)doc["batch"].size();
+    if (total > BATCH_QUEUE_SIZE) { total = BATCH_QUEUE_SIZE; }
 
-      if (!obj.containsKey("v") || !obj.containsKey("p") ||
-          !obj.containsKey("i") || !obj.containsKey("pf")) {
+    for (uint8_t idx = 0; idx < total; idx++) {
+      // Access each element via the proxy chain — no JsonObject needed
+      if (!doc["batch"][idx].containsKey("v") ||
+          !doc["batch"][idx].containsKey("p") ||
+          !doc["batch"][idx].containsKey("i") ||
+          !doc["batch"][idx].containsKey("pf")) {
         Serial.printf("[Shelly] batch[%u] missing fields, skipping\n", idx);
         continue;
       }
 
-      float v  = obj["v"].as<float>();
-      float p  = obj["p"].as<float>();
-      float i  = obj["i"].as<float>();
-      float pf = obj["pf"].as<float>();
+      float v  = doc["batch"][idx]["v"].as<float>();
+      float p  = doc["batch"][idx]["p"].as<float>();
+      float i  = doc["batch"][idx]["i"].as<float>();
+      float pf = doc["batch"][idx]["pf"].as<float>();
 
       if (v < 0.0f || v > 300.0f || p < 0.0f || p > 3680.0f ||
           i < 0.0f || i >  16.0f || pf < 0.0f || pf > 1.01f) {
@@ -208,9 +211,8 @@ public:
         continue;
       }
 
-      // Estimate how far in the past this sample was taken.
-      // idx 0 = oldest sample = (total-1) intervals before arrival,
-      // idx (total-1) = newest = 0 intervals before arrival.
+      // idx 0 = oldest sample = (total-1) intervals before arrival
+      // idx (total-1) = newest = 0 intervals before arrival
       int32_t msAgo = (int32_t)(total - 1 - idx) * (int32_t)INTERVAL_SHELLY_POLL_MS;
 
       _pending[_pendingCount].voltage     = v;
@@ -222,12 +224,10 @@ public:
     }
 
     if (_pendingCount > 0) {
-      // Update watchdog — connection is now established
       _lastPushMs  = millis();
       _graceActive = false;
       _errorCount  = 0;
-      // Seed _latest with the newest batch sample so live display shows
-      // real values immediately, even before consumePendingSample() runs.
+      // Seed _latest with newest batch sample for immediate live display
       uint8_t newestIdx = _pendingCount - 1;
       _latest.voltage     = _pending[newestIdx].voltage;
       _latest.power       = _pending[newestIdx].power;
@@ -235,7 +235,7 @@ public:
       _latest.pf_apparent = _pending[newestIdx].pf_apparent;
       _latest.valid       = true;
       Serial.printf("[Shelly] batch: %u/%u samples queued\n",
-                    (unsigned)_pendingCount, (unsigned)arr.size());
+                    (unsigned)_pendingCount, (unsigned)total);
     }
 
     return (int)_pendingCount;
