@@ -1,77 +1,60 @@
 /**
- * shelly_push.js  –  Shelly Plug S MTR Gen3  •  Firmware Script
- * ==============================================================
+ * shelly_push.js  –  Shelly Plug S MTR Gen3  •  Firmware Script  v3
+ * ==================================================================
  *
- * PURPOSE
- * -------
- * This script runs *on the Shelly device itself* using the built-in
- * mJS (minimal JavaScript) runtime.
+ * Changes vs. v2
+ * --------------
+ *   CHANGED  doPush() — unified buffer strategy
+ *            v2 only buffered while _connected was false (startup phase).
+ *            During a mid-operation WiFi dropout _connected stayed true,
+ *            no buffering occurred, and samples were silently lost.
  *
- * Instead of waiting for the ESP32 to poll us over HTTP, the Shelly
- * actively PUSHES a compact JSON payload to the ESP32 every second.
- * This is far more reliable than polling:
- *   • Timestamps originate at the Shelly (accurate to its uptime clock)
- *   • No missed samples due to ESP32 HTTP round-trip jitter
- *   • If the ESP32 is busy, the Shelly retries naturally on the next tick
+ *            v3 buffers EVERY sample unconditionally. The buffer is
+ *            cleared only on a confirmed HTTP 200 response. This means:
  *
- * WHAT IT DOES
- * ------------
- * Every PUSH_INTERVAL_MS (default: 1000 ms) the script:
- *   1. Reads Switch component status (apower, voltage, current)
- *   2. Derives pf_apparent = apower / (voltage * current)
- *   3. POSTs a JSON body to http://192.168.4.1/api/shelly_push
- *      (the ESP32's fixed softAP IP — always reachable)
+ *            Startup (offline):
+ *              Samples accumulate in _buf[]. Each tick attempts a batch
+ *              POST. On first success _connected=true, _buf cleared.
  *
- * JSON payload sent to ESP32:
- *   {
- *     "ts":      <Shelly uptime ms — monotonic, ESP32 uses its own millis()>,
- *     "v":       <voltage V, 1 decimal>,
- *     "p":       <active power W, 1 decimal>,
- *     "i":       <current A, 3 decimals>,
- *     "pf":      <derived pf_apparent, 2 decimals, or 0 if V*I == 0>
- *   }
+ *            Normal operation (online):
+ *              Each tick buffers the current sample, then immediately
+ *              attempts to POST the buffer (which is always length 1
+ *              under normal conditions). On HTTP 200 _buf is cleared.
+ *              Net effect: identical to v2 single-sample behaviour.
  *
- * INSTALLATION
- * ------------
- * 1. In the Shelly web UI, go to Scripts → Create script
- * 2. Paste this entire file
- * 3. Name it  "ESP32_push"
- * 4. Enable "Run on startup"
- * 5. Save and Start
+ *            Mid-operation dropout:
+ *              Failed push → _connected=false. Buffering continues
+ *              (sliding window, max BUFFER_MAX). On reconnect the
+ *              accumulated samples are sent as a batch and _buf cleared.
+ *              Maximum data loss = samples beyond BUFFER_MAX (> 10 s
+ *              of continuous dropout).
+ *
+ *   UNCHANGED  Relay delay, BUFFER_MAX, payload formats, ESP32 API
  *
  * CONFIGURATION
  * -------------
  * Only change the constants in the CONFIG block below.
- * Do NOT change anything else unless you understand mJS limitations
- * (no classes, no let destructuring, no template literals, no arrow
- * functions in all contexts, 16 KB RAM limit per script).
- *
- * REQUIREMENTS MET
- * ----------------
- * Req 1   – push interval = PUSH_INTERVAL_MS (default 1 s, matches meter cadence)
- * Req 7b  – apower and voltage logged directly from Switch.GetStatus
- * Req 7c  – pf_apparent derived on-device before transmission
- * Req 9   – data delivered to ESP32 via local Wi-Fi (no internet)
- * Req 28  – Shelly cloud must be disabled; script works fully offline
  */
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 var PUSH_INTERVAL_MS = 1000;          // Must match ESP32 INTERVAL_SHELLY_POLL_MS
-var ESP32_IP         = "192.168.4.1"; // ESP32 softAP gateway — never changes (Option B)
+var ESP32_IP         = "192.168.4.1"; // ESP32 softAP gateway — fixed IP
 var PUSH_URL         = "http://" + ESP32_IP + "/api/shelly_push";
-var SWITCH_ID        = 0;             // Plug S has a single switch channel, id=0
+var SWITCH_ID        = 0;             // Plug S has a single switch channel
+
+var RELAY_DELAY_MS   = 2000;          // ms after script start before relay turns on
+var BUFFER_MAX       = 10;            // max samples held offline (sliding window)
 
 // ─── STATE ───────────────────────────────────────────────────────────────────
 
-var _pushPending = false;  // guard: don't stack up HTTP calls if ESP32 is slow
+var _pushPending = false; // guard: don't stack HTTP calls if ESP32 is slow
+var _connected   = false; // true after first successful HTTP 200 from ESP32
+var _relayOn     = false; // true after RELAY_DELAY_MS has elapsed
+var _buf         = [];    // offline sample ring buffer
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
-/**
- * Round a float to `decimals` places.
- * mJS has no Math.round with precision, so we multiply/round/divide.
- */
 function roundTo(val, decimals) {
   var m = 1;
   var i;
@@ -80,98 +63,153 @@ function roundTo(val, decimals) {
 }
 
 /**
- * Build the JSON string manually.
- * mJS JSON.stringify is available but we keep explicit control over
- * decimal precision so the ESP32 parser has predictable field widths.
+ * Read the current Switch measurement and return a sample object,
+ * or null if the hardware reading is not yet available.
  */
-function buildPayload(v, p, current, pf) {
-  return JSON.stringify({
-    ts:  Shelly.getUptimeMs(),
-    v:   roundTo(v,       1),
-    p:   roundTo(p,       1),
-    i:   roundTo(current, 3),
-    pf:  roundTo(pf,      2)
-  });
+function readSample() {
+  var sw = Shelly.getComponentStatus("switch", SWITCH_ID);
+  if (!sw) { return null; }
+
+  var v       = sw.voltage;
+  var p       = sw.apower;
+  var current = sw.current;
+
+  if (v === null || v === undefined ||
+      p === null || p === undefined ||
+      current === null || current === undefined) {
+    return null;
+  }
+
+  var vi = v * current;
+  var pf;
+  if (vi < 0.001) {
+    pf = 0.0;
+  } else {
+    pf = p / vi;
+    if (pf > 1.0) { pf = 1.0; }
+    if (pf < 0.0) { pf = 0.0; }
+  }
+
+  return {
+    ts: Shelly.getUptimeMs(),
+    v:  roundTo(v,       1),
+    p:  roundTo(p,       1),
+    i:  roundTo(current, 3),
+    pf: roundTo(pf,      2)
+  };
+}
+
+/**
+ * Append sample to the offline buffer.
+ * If BUFFER_MAX is reached, drop the oldest entry (sliding window).
+ */
+function bufferSample(s) {
+  _buf.push(s);
+  if (_buf.length > BUFFER_MAX) {
+    _buf.shift();  // drop oldest
+  }
 }
 
 // ─── CORE PUSH FUNCTION ───────────────────────────────────────────────────────
 
 function doPush() {
-  // If last HTTP call hasn't returned yet, skip this tick.
-  // This prevents unbounded request queuing if the ESP32 is slow.
+  // ── 1. Relay delay ─────────────────────────────────────────────────────────
+  if (!_relayOn && Shelly.getUptimeMs() >= RELAY_DELAY_MS) {
+    Shelly.call("Switch.Set", { id: SWITCH_ID, on: true }, null);
+    _relayOn = true;
+    print("[shelly_push] relay ON after", RELAY_DELAY_MS, "ms delay");
+  }
+
+  // ── 2. Always sample and buffer ────────────────────────────────────────────
+  // The buffer is cleared only on a confirmed HTTP 200. This means:
+  //   • Startup:          _buf grows until first successful batch POST.
+  //   • Normal operation: _buf holds exactly 1 sample; cleared each tick.
+  //   • Dropout:          _buf grows (sliding window) until reconnect.
+  var s = readSample();
+  if (!s) {
+    print("[shelly_push] measurement unavailable, skipping");
+    return;
+  }
+  bufferSample(s);
+
+  // ── 3. Guard: only one HTTP request in flight at a time ────────────────────
   if (_pushPending) {
     print("[shelly_push] skipping tick – previous request still pending");
     return;
   }
 
-  // Read current Switch component status synchronously via getComponentStatus.
-  // This is a zero-cost local read — no network call, no callback.
-  var sw = Shelly.getComponentStatus("switch", SWITCH_ID);
+  // ── 4. Send buffer as batch (works for both 1-sample and multi-sample) ─────
+  // Using batch format always would change the ESP32 routing path on every
+  // tick. Instead: single-sample format when _buf has exactly 1 entry AND
+  // we are already connected — preserves the fast normal-operation path.
+  // Multi-sample (startup or dropout recovery): always batch format.
 
-  if (!sw) {
-    print("[shelly_push] switch status unavailable, skipping");
-    return;
-  }
+  if (_connected && _buf.length === 1) {
+    // ── 4a. Normal operation: single-sample POST (fast path) ─────────────────
+    var body = JSON.stringify(s);
+    _pushPending = true;
 
-  var v       = sw.voltage;  // V RMS
-  var p       = sw.apower;   // active power W
-  var current = sw.current;  // current A RMS
-
-  // Guard against nulls (can occur briefly at startup)
-  if (v === null || v === undefined ||
-      p === null || p === undefined ||
-      current === null || current === undefined) {
-    print("[shelly_push] null measurement, skipping");
-    return;
-  }
-
-  // Derive pf_apparent = P / (V * I).
-  // Clamped to [0, 1] — negative apparent PF not meaningful for logging.
-  var vi = v * current;
-  var pf;
-  if (vi < 0.001) {
-    pf = 0.0;  // avoid divide-by-zero at idle / standby
-  } else {
-    pf = p / vi;
-    if (pf > 1.0)  { pf = 1.0; }
-    if (pf < 0.0)  { pf = 0.0; }
-  }
-
-  var body = buildPayload(v, p, current, pf);
-
-  _pushPending = true;
-
-  Shelly.call(
-    "HTTP.Request",
-    {
-      method:  "POST",
-      url:     PUSH_URL,
-      headers: {"Content-Type": "application/json"},
-      body:    body,
-      timeout: 1   // seconds; MUST be < PUSH_INTERVAL_MS/1000 (1 s) so _pushPending
-                   // is always cleared before the next tick fires.
-                   // At 2 s the flag could stay set across a tick boundary during
-                   // ESP32 boot/reconnect, causing the watchdog to trip permanently.
-    },
-    function(result, error_code, error_msg) {
-      _pushPending = false;
-      if (error_code !== 0) {
-        // Log but don't crash — the ESP32 may be restarting or the
-        // network link may be briefly down. We'll retry next tick.
-        print("[shelly_push] HTTP error", error_code, error_msg);
+    Shelly.call(
+      "HTTP.Request",
+      {
+        method:  "POST",
+        url:     PUSH_URL,
+        headers: {"Content-Type": "application/json"},
+        body:    body,
+        timeout: 1
+      },
+      function(result, error_code, error_msg) {
+        _pushPending = false;
+        if (error_code === 0 && result && result.code === 200) {
+          _buf = [];   // confirmed delivered — discard
+        } else {
+          // Dropout detected: re-enter offline mode so next tick buffers
+          // and attempts a batch recovery POST.
+          _connected = false;
+          print("[shelly_push] dropout detected, buffering:", error_code, error_msg);
+          // Current sample stays in _buf — will be included in next batch.
+        }
       }
-      // Success case: result.code should be 200. We don't act on the body.
-    }
-  );
+    );
+
+  } else {
+    // ── 4b. Offline or dropout recovery: batch POST ───────────────────────────
+    var batchBody = JSON.stringify({ batch: _buf });
+    _pushPending = true;
+
+    Shelly.call(
+      "HTTP.Request",
+      {
+        method:  "POST",
+        url:     PUSH_URL,
+        headers: {"Content-Type": "application/json"},
+        body:    batchBody,
+        timeout: 1
+      },
+      function(result, error_code, error_msg) {
+        _pushPending = false;
+        if (error_code === 0 && result && result.code === 200) {
+          _connected = true;
+          _buf = [];   // ESP32 has all buffered samples — discard
+          print("[shelly_push] (re)connected, batch delivered");
+        } else {
+          // Still offline — keep buffering, try again next tick
+          print("[shelly_push] batch attempt failed:", error_code, error_msg);
+        }
+      }
+    );
+  }
 }
 
 // ─── STARTUP ─────────────────────────────────────────────────────────────────
 
-print("[shelly_push] starting, pushing to", PUSH_URL, "every", PUSH_INTERVAL_MS, "ms");
+print("[shelly_push] v2 starting – relay delay:", RELAY_DELAY_MS,
+      "ms, buffer:", BUFFER_MAX, "samples");
 
-// Ensure the relay stays ON so the appliance under test is always powered.
-// This prevents accidental toggling via the physical button or other scripts.
-Shelly.call("Switch.Set", { id: SWITCH_ID, on: true }, null);
+// Relay starts OFF. doPush() turns it on after RELAY_DELAY_MS.
+// Do NOT call Switch.Set here — leave relay in its current state until
+// the delay expires. On a cold boot the Shelly relay defaults to OFF.
+Shelly.call("Switch.Set", { id: SWITCH_ID, on: false }, null);
 
-// Main periodic timer — repeating.
+// Main periodic timer — repeating every PUSH_INTERVAL_MS.
 Timer.set(PUSH_INTERVAL_MS, true, doPush, null);
