@@ -30,6 +30,11 @@ struct DeserializationError {
   const char* c_str()      const { return _msg.c_str(); }
 };
 
+// Type tags used with is<T>() — only JsonArray needed by ShellyClient.
+// These are empty structs; their identity is used purely as template arguments.
+struct JsonArray  {};
+struct JsonObject {};
+
 // ─── Proxy returned by operator[] ────────────────────────────────────────────
 // Wraps a pointer to a nlohmann::json node (null if key absent / out-of-range).
 // Supports: .as<T>(), .containsKey(), .isArray(), .size(), operator[](size_t),
@@ -50,9 +55,16 @@ struct JsonProxy {
     return _v && _v->is_object() && _v->contains(k);
   }
 
-  // Array type check
+  // Array type check — legacy name kept for clarity
   bool isArray() const {
     return _v && _v->is_array();
+  }
+
+  // ArduinoJson v7 API: doc["key"].is<JsonArray>()
+  // The stub only needs to handle JsonArray in practice.
+  template<typename T>
+  bool is() const {
+    return isArray();   // only called with JsonArray in ShellyClient
   }
 
   // Array / object size
