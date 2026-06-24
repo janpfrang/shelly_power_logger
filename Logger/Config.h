@@ -1,5 +1,5 @@
 /*
- * Config.h - Zentrale Konfiguration v10  (Shelly + ESP32 + OTA + Power-loss + RTC)
+ * Config.h - Zentrale Konfiguration v10  (Shelly + ESP32 + OTA + Power-loss + RTC )
  * =================================================================================
  *
  * Changes vs. v9:
