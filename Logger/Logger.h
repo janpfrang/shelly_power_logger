@@ -288,6 +288,29 @@ public:
     return true;
   }
 
+  // -- Emergency flush on power loss: marks buffered samples power_lost=1,
+  //    appends a sentinel row with the trigger voltage, then flushes.
+  //    Called from handlePowerLoss() in the .ino instead of plain flushToSD().
+  bool flushPowerLost(float supplyV) {
+    for (size_t i = 0; i < _bufferCount; i++) {
+      _buffer[i].power_lost = true;
+    }
+    if (_bufferCount < RAM_BUFFER_SIZE) {
+      uint32_t now = millis();
+      uint32_t uts = (_rtc != nullptr) ? (uint32_t)_rtc->now().unixtime() : 0;
+      Sample sentinel;
+      sentinel.millis_ts  = now;
+      sentinel.unix_ts    = uts;
+      sentinel.voltage_V  = isnan(_lastVoltage) ? 0.0f : _lastVoltage;
+      sentinel.power_W    = isnan(_lastPower)   ? 0.0f : _lastPower;
+      sentinel.pf         = isnan(_lastPf)      ? 0.0f : _lastPf;
+      sentinel.supply_V   = supplyV;
+      sentinel.power_lost = true;
+      _buffer[_bufferCount++] = sentinel;
+    }
+    return flushToSD();
+  }
+
   // -- Reset log file (POST /reset handler) ----------------------------------
   bool resetSDFile() {
     if (!_sdOk) return false;
