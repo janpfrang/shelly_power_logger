@@ -1,6 +1,14 @@
 /*
- * PowerMonitor.h  -  9V-rail loss detection  (v2)
+ * PowerMonitor.h  -  9V-rail loss detection  (v3)
  * =================================================
+ *
+ * Changes vs. v2
+ * --------------
+ *   ADDED  _lastRailMv cached member -- updated every POWER_CHECK_INTERVAL_MS
+ *          inside update().  Allows WebPortal and Logger to read the latest
+ *          rail voltage without triggering an extra oversampled ADC burst.
+ *   ADDED  getLastRailMilliVolts() -- returns _lastRailMv (0 when
+ *          POWER_MONITOR_ENABLED == 0 or during startup grace).
  *
  * Changes vs. v1
  * --------------
@@ -116,7 +124,8 @@ public:
       _startupMs(0),
       _lastCheckMs(0),
       _belowCount(0),
-      _powerLost(false)
+      _powerLost(false),
+      _lastRailMv(0)
   {}
 
   // Configure the ADC for the GPIO 35 divider tap.
@@ -154,6 +163,7 @@ public:
     _lastCheckMs = now;
 
     uint32_t railMv = readRailMilliVolts();
+    _lastRailMv = railMv;   // cache for getLastRailMilliVolts()
 
     // Hysteresis + majority voting.
     if (railMv < POWER_THRESHOLD_LOW_MV) {
@@ -178,6 +188,17 @@ public:
     return false;
 #else
     return _powerLost;
+#endif
+  }
+
+  // Returns the most recently cached rail voltage in millivolts.
+  // Updated every POWER_CHECK_INTERVAL_MS by update().
+  // Returns 0 when POWER_MONITOR_ENABLED == 0 or during startup grace.
+  uint32_t getLastRailMilliVolts() const {
+#if POWER_MONITOR_ENABLED == 0
+    return 0;
+#else
+    return _lastRailMv;
 #endif
   }
 
@@ -208,6 +229,7 @@ private:
   uint32_t _lastCheckMs;   // last time the rail was sampled
   uint8_t  _belowCount;    // consecutive below-threshold checks
   bool     _powerLost;     // latched trigger flag
+  uint32_t _lastRailMv;    // cached result of last readRailMilliVolts() call
 };
 
 #endif  // POWER_MONITOR_H
