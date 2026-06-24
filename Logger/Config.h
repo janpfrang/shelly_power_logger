@@ -137,7 +137,7 @@
 //   the softAP disappears before anyone can connect.
 // With this flag = 0, PowerMonitor::update() and isPowerLost() are
 // no-ops; all other firmware is completely unaffected.
-#define POWER_MONITOR_ENABLED      0       // <<<  set to 1 once HW circuit is built
+#define POWER_MONITOR_ENABLED      1       // HW circuit populated -- set to 0 if resistors removed
 
 // ADC calibration correction
 // --------------------------
