@@ -936,11 +936,11 @@ WebPortal::WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc, Powe
 bool WebPortal::begin() {
   Serial.println("[Web] Starte WLAN AP+STA...");
 
-  // Option B: AP+STA mode.
-  // softAP is the network anchor for both the Shelly and the user's phone.
-  // STA is used only if a future feature needs to reach out (e.g., NTP).
-  // For now STA is started but not connected to any external network.
-  WiFi.mode(WIFI_AP_STA);
+  // AP-only mode: no STA scanning, radio stays locked on AP channel.
+  // WIFI_AP_STA was causing random 1-3 s AP blackouts every few seconds
+  // because the ESP32 radio performs background channel scans when STA
+  // is active but unconnected, making the softAP deaf during each scan.
+  WiFi.mode(WIFI_AP);
 
   if (!WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD)) {
     Serial.println("[Web] softAP() fehlgeschlagen!");
