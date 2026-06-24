@@ -157,8 +157,8 @@
 #define POWER_THRESHOLD_HIGH_MV    7190    // raw ADC recover  (true rail ~7.75 V)
 #define POWER_STARTUP_GRACE_MS    10000    // ignore readings while supercaps charge
                                            // (was 3000 -- too short; AP needs ~500 ms to
-                                           //  start, leaving almost no margin before the
-                                           //  first loop() checks began firing)
+                                           // start, leaving almost no margin before the
+                                           // first loop() checks began firing)
 #define POWER_CHECK_INTERVAL_MS     200    // how often the rail is sampled
 #define POWER_ADC_SAMPLES            16    // oversampling count (noise ~ 1/sqrt(N))
 #define POWER_ADC_SAMPLE_GAP_US     200    // spacing between oversamples
