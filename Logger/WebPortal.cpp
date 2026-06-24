@@ -934,30 +934,38 @@ WebPortal::WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc, Powe
   : _logger(logger), _shelly(shelly), _rtc(rtc), _pm(pm), _server(HTTP_PORT) {}
 
 bool WebPortal::begin() {
-  Serial.println("[Web] Starte WLAN AP+STA...");
+  Serial.println("[Web] Starte WLAN AP...");
 
-  // AP-only mode: no STA scanning, radio stays locked on AP channel.
-  // WIFI_AP_STA was causing random 1-3 s AP blackouts every few seconds
-  // because the ESP32 radio performs background channel scans when STA
-  // is active but unconnected, making the softAP deaf during each scan.
   WiFi.mode(WIFI_AP);
+
+  // Disable power saving on the WiFi radio -- power save mode causes the
+  // radio to sleep between beacon intervals (~100 ms), making it deaf to
+  // incoming packets during sleep windows. This is the single biggest cause
+  // of random HTTP timeouts on the ESP32 softAP.
+  WiFi.setSleep(false);
 
   if (!WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD)) {
     Serial.println("[Web] softAP() fehlgeschlagen!");
     return false;
   }
-  IPAddress ip = WiFi.softAPIP();
-  Serial.printf("[Web] AP '%s' aktiv, IP: %s\n", WIFI_AP_SSID, ip.toString().c_str());
 
-  // Captive portal DNS catch-all
+  // Lock the AP to channel 6 -- avoids automatic channel selection which
+  // can change channel after reboot, requiring clients to re-scan.
+  // Channel 6 is the standard non-overlapping channel (1/6/11).
+  WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, 6);
+
+  IPAddress ip = WiFi.softAPIP();
+  Serial.printf("[Web] AP '%s' aktiv auf Kanal 6, IP: %s\n", WIFI_AP_SSID, ip.toString().c_str());
+
+  // DNS catch-all for captive portal detection only.
+  // Resolves every hostname to the ESP32 IP so browsers redirect to our page.
   _dns.start(DNS_PORT, "*", ip);
   Serial.println("[Web] DNS-Server gestartet (catch-all)");
 
-  // mDNS -- braun_PZEM.local  (Req: plain-text hostname)
-  if (MDNS.begin(WIFI_AP_HOSTNAME)) {
-    MDNS.addService("http", "tcp", HTTP_PORT);
-    Serial.printf("[Web] mDNS aktiv: http://%s.local\n", WIFI_AP_HOSTNAME);
-  }
+  // mDNS intentionally disabled -- ESPmDNS background processing causes
+  // random 100-500 ms loop stalls that block HTTP responses.
+  // Use http://192.168.4.1 directly or the captive portal redirect instead.
+  // MDNS.begin(WIFI_AP_HOSTNAME);  // disabled
 
   // -- Captive portal probes ----------------------------------------------
   _server.on("/generate_204",              HTTP_GET, [this](){ handleCaptivePortal(); });
@@ -996,7 +1004,14 @@ bool WebPortal::begin() {
 }
 
 void WebPortal::update() {
-  _dns.processNextRequest();
+  // Rate-limit DNS to every 50 ms -- captive portal probes from iOS/Windows
+  // arrive in bursts and processNextRequest() handles only one per call,
+  // so without rate-limiting it can starve handleClient() on busy ticks.
+  uint32_t now = millis();
+  if (now - _lastDnsMs >= 50) {
+    _dns.processNextRequest();
+    _lastDnsMs = now;
+  }
   _server.handleClient();
 }
 
@@ -1096,6 +1111,7 @@ void WebPortal::handleDownload() {
   _server.sendHeader("Content-Disposition", "attachment; filename=log.csv");
   _server.streamFile(f, "text/csv");
   f.close();
+  _logger.reopenLogFile();   // restore persistent write handle after read
 }
 
 void WebPortal::handleReset() {
