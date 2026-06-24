@@ -70,7 +70,8 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
   <hr style="border: 0; border-top: 1px solid #eee; margin: 1em 0;">
   <div class="status">
     Shelly: <span id="shelly-status" class="ok">?</span>
-    SD:     <span id="sd-status"     class="ok">?</span><br><br>
+    SD:     <span id="sd-status"     class="ok">?</span>
+    Versorg: <span id="supply-status" class="ok">?</span><br><br>
     Puffer: <span id="buf">0</span>
     | Verworfen: <span id="drop">0</span>
     | Uptime: <span id="uptime">0</span> s
@@ -115,6 +116,15 @@ async function refresh() {
     const sd = document.getElementById('sd-status');
     sd.textContent = d.sd_ok ? 'OK' : 'FEHLER';
     sd.className   = d.sd_ok   ? 'ok' : 'err';
+    const sv = document.getElementById('supply-status');
+    if (d.supply_mv === 0) {
+      sv.textContent = 'N/A';
+      sv.className   = 'ok';
+    } else {
+      const supplyV = (d.supply_mv / 1000.0).toFixed(1);
+      sv.textContent = supplyV + ' V';
+      sv.className   = d.supply_ok ? 'ok' : 'err';
+    }
     document.getElementById('ota-banner').style.display =
       d.ota_active ? 'block' : 'none';
   } catch (e) {
@@ -920,8 +930,8 @@ function hideMsg() {
 // Implementation
 // -----------------------------------------------------------------------------
 
-WebPortal::WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc)
-  : _logger(logger), _shelly(shelly), _rtc(rtc), _server(HTTP_PORT) {}
+WebPortal::WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc, PowerMonitor* pm)
+  : _logger(logger), _shelly(shelly), _rtc(rtc), _pm(pm), _server(HTTP_PORT) {}
 
 bool WebPortal::begin() {
   Serial.println("[Web] Starte WLAN AP+STA...");
@@ -1033,7 +1043,7 @@ void WebPortal::handleShellyPush() {
   }
 }
 
-// -- /api/live -- includes shelly_ok (v6) and ota_active (v7) -------------
+// -- /api/live -- includes shelly_ok (v6), ota_active (v7), supply_mv (v9) --
 void WebPortal::handleApiLive() {
   char buf[API_BUFFER_SIZE];
   float p  = _logger.getLastPower();
@@ -1041,7 +1051,7 @@ void WebPortal::handleApiLive() {
   float pf = _logger.getLastPf();
 
   // Build only the sensor part conditionally. The status fields
-  // (buffer/dropped/uptime/shelly_ok/sd_ok/ota_active) are identical in
+  // (buffer/dropped/uptime/shelly_ok/sd_ok/ota_active/supply_mv) are identical in
   // both cases, so they are formatted exactly once below -- adding a new
   // status field means editing one place, not two.
   char sensor[72];
@@ -1053,16 +1063,24 @@ void WebPortal::handleApiLive() {
              "\"power\":%.1f,\"voltage\":%.1f,\"pf\":%.2f", p, v, pf);
   }
 
+  // Supply voltage: read from PowerMonitor cache (0 when monitor disabled).
+  uint32_t supplyMv   = _pm ? _pm->getLastRailMilliVolts() : 0;
+  bool     supplyOk   = (supplyMv == 0) ||
+                        (supplyMv >= POWER_THRESHOLD_LOW_MV);  // green when disabled too
+
   snprintf(buf, sizeof(buf),
     "{%s,\"buffer\":%u,\"dropped\":%lu,\"uptime\":%lu,"
-    "\"shelly_ok\":%s,\"sd_ok\":%s,\"ota_active\":%s}",
+    "\"shelly_ok\":%s,\"sd_ok\":%s,\"ota_active\":%s,"
+    "\"supply_mv\":%lu,\"supply_ok\":%s}",
     sensor,
     (unsigned)_logger.getBufferCount(),
     (unsigned long)_logger.getDroppedSamples(),
     (unsigned long)(millis() / 1000),
-    _logger.shellyOk()      ? "true" : "false",
-    _logger.sdOk()          ? "true" : "false",
-    _logger.isOtaInProgress() ? "true" : "false");
+    _logger.shellyOk()        ? "true" : "false",
+    _logger.sdOk()            ? "true" : "false",
+    _logger.isOtaInProgress() ? "true" : "false",
+    (unsigned long)supplyMv,
+    supplyOk                  ? "true" : "false");
 
   _server.send(200, "application/json", buf);
 }
