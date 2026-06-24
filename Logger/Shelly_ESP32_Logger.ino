@@ -1,12 +1,15 @@
 /*
- * Shelly_ESP32_Logger.ino  v3
+ * Shelly_ESP32_Logger.ino  v4
  * ============================
  *
- * Changes vs. v2
+ * Changes vs. v3
  * --------------
- *   CHANGED  WebPortal webPortal(...) -- &rtc passed as third argument so
- *            WebPortal can serve POST /api/set_rtc and display RTC time
- *            on the home page and settings page.
+ *   CHANGED  PowerMonitor instantiated BEFORE WebPortal (dependency order)
+ *   CHANGED  WebPortal webPortal(...) -- &powerMonitor passed as fourth arg
+ *            so WebPortal can include supply voltage in /api/live JSON and
+ *            display it in the web UI badge (Versorg: xx.x V).
+ *   ADDED    logger.setLastSupplyV() call in loop() -- stamps the 9V-rail
+ *            reading into every CSV sample as column supply_V.
  *   UNCHANGED: everything else
  *
  * Changes vs. v1
@@ -78,9 +81,9 @@
 ShellyClient shelly;
 RTC_DS3231   rtc;
 Logger       logger(shelly, &rtc);      // &rtc: optional pointer; nullptr = RTC absent
-WebPortal    webPortal(logger, shelly, &rtc);  // v8: rtc passed so /api/set_rtc works
-StatusLed    statusLed;
 PowerMonitor powerMonitor;
+WebPortal    webPortal(logger, shelly, &rtc, &powerMonitor);  // v9: powerMonitor for supply display
+StatusLed    statusLed;
 
 // Forward declaration (Arduino auto-prototypes, but explicit is clearer).
 void handlePowerLoss();
@@ -136,6 +139,8 @@ void loop() {
   if (powerMonitor.isPowerLost()) {
     handlePowerLoss();
   }
+  // Pass latest rail voltage to Logger so it gets stamped into CSV samples.
+  logger.setLastSupplyV(powerMonitor.getLastRailMilliVolts() / 1000.0f);
 
   // 1. Check if new Shelly data is due to be sampled into the ring buffer
   logger.pollIfDue();
