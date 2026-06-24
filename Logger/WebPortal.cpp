@@ -938,21 +938,17 @@ bool WebPortal::begin() {
 
   WiFi.mode(WIFI_AP);
 
-  // Disable power saving on the WiFi radio -- power save mode causes the
-  // radio to sleep between beacon intervals (~100 ms), making it deaf to
-  // incoming packets during sleep windows. This is the single biggest cause
-  // of random HTTP timeouts on the ESP32 softAP.
+  // Disable radio power saving -- power save mode causes the radio to sleep
+  // between beacon intervals, making it deaf to incoming packets.
   WiFi.setSleep(false);
 
-  if (!WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD)) {
+  // Single softAP call with channel 6 locked.
+  // Channel 6 is a standard non-overlapping channel (1/6/11).
+  // Fixed channel prevents clients needing to re-scan after reboot.
+  if (!WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, 6)) {
     Serial.println("[Web] softAP() fehlgeschlagen!");
     return false;
   }
-
-  // Lock the AP to channel 6 -- avoids automatic channel selection which
-  // can change channel after reboot, requiring clients to re-scan.
-  // Channel 6 is the standard non-overlapping channel (1/6/11).
-  WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, 6);
 
   IPAddress ip = WiFi.softAPIP();
   Serial.printf("[Web] AP '%s' aktiv auf Kanal 6, IP: %s\n", WIFI_AP_SSID, ip.toString().c_str());
@@ -1111,7 +1107,6 @@ void WebPortal::handleDownload() {
   _server.sendHeader("Content-Disposition", "attachment; filename=log.csv");
   _server.streamFile(f, "text/csv");
   f.close();
-  _logger.reopenLogFile();   // restore persistent write handle after read
 }
 
 void WebPortal::handleReset() {
