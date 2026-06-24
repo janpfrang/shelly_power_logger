@@ -1297,7 +1297,7 @@ void WebPortal::handleApiSetRtc() {
     return;
   }
 
-  StaticJsonDocument<128> doc;
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, body);
   if (err) {
     _server.send(400, "application/json", "{\"error\":\"JSON parse failed\"}");
