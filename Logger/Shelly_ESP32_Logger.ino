@@ -139,8 +139,9 @@ void loop() {
   if (powerMonitor.isPowerLost()) {
     handlePowerLoss();
   }
-  // Pass latest rail voltage to Logger so it gets stamped into CSV samples.
+  // Pass latest rail voltage and power-lost state to Logger for CSV stamping.
   logger.setLastSupplyV(powerMonitor.getLastRailMilliVolts() / 1000.0f);
+  logger.setLastPowerLost(powerMonitor.isPowerLost());
 
   // 1. Check if new Shelly data is due to be sampled into the ring buffer
   logger.pollIfDue();
