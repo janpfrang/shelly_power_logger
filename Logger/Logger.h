@@ -110,7 +110,7 @@ public:
       _lastPowerLost(false),
       _sdOk(false),
       _otaInProgress(false),
-      _pollIntervalMs(INTERVAL_SHELLY_POLL_MS),   // 1000 ms default
+      _pollIntervalMs(INTERVAL_SHELLY_POLL_MS),
       _powerThresholdW(DEFAULT_POWER_THRESHOLD_W)
   {}
 
@@ -118,6 +118,7 @@ public:
     _sdSPI.begin(PIN_SD_CLK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
     _sdOk = initSDCard();
     Serial.printf("[Logger] SD=%s\n", _sdOk ? "OK" : "FEHLER");
+    if (_sdOk) openLogFile();
     return _sdOk;
   }
 
@@ -252,16 +253,15 @@ public:
   bool flushToSD() {
     if (!_sdOk || _bufferCount == 0) return _sdOk;
 
-    File f = SD.open(LOG_FILE_PATH, FILE_APPEND);
-    if (!f) {
-      Serial.println("[Logger] SD-Open fehlgeschlagen, markiere SD als defekt");
+    // Re-open if the handle was closed (e.g. after reset or SD recovery)
+    if (!_logFile) openLogFile();
+    if (!_logFile) {
+      Serial.println("[Logger] Log-Datei konnte nicht geoeffnet werden");
       _sdOk = false;
       return false;
     }
 
     for (size_t i = 0; i < _bufferCount; i++) {
-      // Format wall-clock timestamp as ISO-8601: YYYY-MM-DDTHH:MM:SS
-      // unix_ts == 0 means the RTC was absent or not set.
       char dtbuf[20];
       if (_buffer[i].unix_ts > 0) {
         DateTime dt(_buffer[i].unix_ts);
@@ -271,7 +271,7 @@ public:
       } else {
         snprintf(dtbuf, sizeof(dtbuf), "RTC_NOT_SET");
       }
-      f.printf("%s,%lu,%.1f,%.1f,%.2f,%.2f,%d\n",
+      _logFile.printf("%s,%lu,%.1f,%.1f,%.2f,%.2f,%d\n",
                dtbuf,
                (unsigned long)_buffer[i].millis_ts,
                _buffer[i].voltage_V,
@@ -280,8 +280,7 @@ public:
                _buffer[i].supply_V,
                _buffer[i].power_lost ? 1 : 0);
     }
-    f.flush();
-    f.close();
+    _logFile.flush();   // flush to SD without closing -- FAT chain stays cached
 
     Serial.printf("[Logger] %u Samples auf SD geschrieben\n",
                   (unsigned)_bufferCount);
@@ -289,39 +288,16 @@ public:
     return true;
   }
 
-  // -- Emergency flush on power loss: marks all buffered samples power_lost=1,
-  //    appends a sentinel row with current supply voltage, then flushes.
-  //    Called from handlePowerLoss() in the .ino instead of plain flushToSD().
-  bool flushPowerLost(float supplyV) {
-    // Mark every sample still in the buffer as power_lost
-    for (size_t i = 0; i < _bufferCount; i++) {
-      _buffer[i].power_lost = true;
-    }
-    // Append one sentinel row capturing the moment of trigger
-    if (_bufferCount < RAM_BUFFER_SIZE) {
-      uint32_t now = millis();
-      uint32_t uts = (_rtc != nullptr) ? (uint32_t)_rtc->now().unixtime() : 0;
-      // Use last known Shelly values for voltage/power/pf (may be stale but best available)
-      Sample sentinel;
-      sentinel.millis_ts  = now;
-      sentinel.unix_ts    = uts;
-      sentinel.voltage_V  = isnan(_lastVoltage) ? 0.0f : _lastVoltage;
-      sentinel.power_W    = isnan(_lastPower)   ? 0.0f : _lastPower;
-      sentinel.pf         = isnan(_lastPf)      ? 0.0f : _lastPf;
-      sentinel.supply_V   = supplyV;
-      sentinel.power_lost = true;
-      _buffer[_bufferCount++] = sentinel;
-    }
-    return flushToSD();
-  }
-
-
+  // -- Reset log file (POST /reset handler) ----------------------------------
   bool resetSDFile() {
     if (!_sdOk) return false;
     _bufferCount = 0;
+    // Close persistent handle before deleting
+    if (_logFile) { _logFile.close(); }
     if (SD.exists(LOG_FILE_PATH)) {
       if (!SD.remove(LOG_FILE_PATH)) {
         Serial.println("[Logger] SD.remove fehlgeschlagen");
+        openLogFile();   // reopen even on failure
         return false;
       }
     }
@@ -330,6 +306,7 @@ public:
     f.println(LOG_FILE_HEADER);
     f.close();
     Serial.println("[Logger] Log-Datei zurueckgesetzt");
+    openLogFile();   // reopen for appending
     return true;
   }
 
@@ -351,13 +328,25 @@ public:
 
   File openLogFileForRead() {
     if (!_sdOk) return File();
-    return SD.open(LOG_FILE_PATH, FILE_READ);
+    // Flush and close write handle before opening for read
+    if (_logFile) {
+      _logFile.flush();
+      _logFile.close();
+    }
+    File f = SD.open(LOG_FILE_PATH, FILE_READ);
+    // Reopen write handle after caller is done -- caller must call
+    // reopenLogFile() or the next flush will reopen automatically.
+    return f;
   }
 
+  // Called after openLogFileForRead() stream is closed by the caller.
+  void reopenLogFile() { openLogFile(); }
+
 private:
-  ShellyClient& _shelly;      // injected reference -- not owned
-  RTC_DS3231*   _rtc;         // optional injected pointer -- not owned (nullptr = no RTC)
+  ShellyClient& _shelly;
+  RTC_DS3231*   _rtc;
   SPIClass      _sdSPI;
+  File          _logFile;          // persistent write handle -- kept open between flushes
   Sample        _buffer[RAM_BUFFER_SIZE];
   size_t        _bufferCount;
   uint32_t      _droppedSamples;
@@ -396,8 +385,21 @@ private:
     }
   }
 
+  // Open (or reopen) the log file for appending.
+  // FAT chain traversal happens HERE once -- all subsequent flushes are fast.
+  void openLogFile() {
+    if (_logFile) _logFile.close();
+    _logFile = SD.open(LOG_FILE_PATH, FILE_APPEND);
+    if (_logFile) {
+      Serial.println("[Logger] Log-Datei geoeffnet (persistent handle)");
+    } else {
+      Serial.println("[Logger] Log-Datei open fehlgeschlagen");
+      _sdOk = false;
+    }
+  }
+
   bool initSDCard() {
-    return SD.begin(PIN_SD_CS, _sdSPI, 4000000);
+    return SD.begin(PIN_SD_CS, _sdSPI, 20000000);  // 20 MHz
   }
 
   // -- SD auto-recovery every 30 s (unchanged from v4) ----------------------
@@ -407,6 +409,7 @@ private:
     _lastSdRetryMs = now;
 
     Serial.println("[Logger] Versuche SD-Karte neu zu initialisieren...");
+    if (_logFile) _logFile.close();
     SD.end();
     delay(50);
     _sdOk = initSDCard();
@@ -415,6 +418,7 @@ private:
         File f = SD.open(LOG_FILE_PATH, FILE_WRITE);
         if (f) { f.println(LOG_FILE_HEADER); f.close(); }
       }
+      openLogFile();
       Serial.println("[Logger] SD wieder verfuegbar");
     }
   }
