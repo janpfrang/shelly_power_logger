@@ -109,7 +109,7 @@ public:
   // body: {"ts":…,"v":…,"p":…,"i":…,"pf":…}
   // Returns true on success.
   bool ingest(const String& body) {
-    StaticJsonDocument<192> doc;
+    JsonDocument doc;
     DeserializationError err = deserializeJson(doc, body);
 
     if (err) {
@@ -168,7 +168,7 @@ public:
   // The document size 768 B covers 10 samples × ~60 B + overhead on the
   // real device (StaticJsonDocument lives on the stack; fine for ESP32).
   int ingestBatch(const String& body) {
-    StaticJsonDocument<768> doc;
+    JsonDocument doc;
     DeserializationError err = deserializeJson(doc, body);
 
     if (err) {
