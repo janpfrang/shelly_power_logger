@@ -34,9 +34,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
-#include <ESPmDNS.h>
-#include <Update.h>          // ESP32 OTA flash writer (bundled with arduino-esp32)
-#include <RTClib.h>          // Adafruit RTClib -- DS3231 driver
+#include <Update.h>
+#include <RTClib.h>
 #include "Config.h"
 #include "Logger.h"
 #include "ShellyClient.h"
@@ -56,10 +55,11 @@ public:
 private:
   Logger&        _logger;
   ShellyClient&  _shelly;
-  RTC_DS3231*    _rtc;        // optional -- nullptr means no RTC available
-  PowerMonitor*  _pm;         // optional -- nullptr means no 9V monitor circuit
+  RTC_DS3231*    _rtc;
+  PowerMonitor*  _pm;
   WebServer      _server;
   DNSServer      _dns;
+  uint32_t       _lastDnsMs = 0;   // rate-limits DNS processing to every 50 ms
 
   // -- Page handlers (unchanged from v7) ------------------------------------
   void handleRoot();
