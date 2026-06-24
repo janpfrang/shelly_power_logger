@@ -1,5 +1,5 @@
 /*
- * Config.h - Zentrale Konfiguration v10  (Shelly + ESP32 + OTA + Power-loss + RTC )
+ * Config.h - Zentrale Konfiguration v10  (Shelly + ESP32 + OTA + Power-loss + RTC)
  * =================================================================================
  *
  * Changes vs. v9:
@@ -137,10 +137,24 @@
 //   the softAP disappears before anyone can connect.
 // With this flag = 0, PowerMonitor::update() and isPowerLost() are
 // no-ops; all other firmware is completely unaffected.
-#define POWER_MONITOR_ENABLED      1       // <<<  set to 1 once HW circuit is built
+#define POWER_MONITOR_ENABLED      0       // <<<  set to 1 once HW circuit is built
 
-#define POWER_THRESHOLD_LOW_MV     7350    // trigger shutdown below this (mV, 9V rail)
-#define POWER_THRESHOLD_HIGH_MV    7750    // hysteresis: clear / recover above this (mV)
+// ADC calibration correction
+// --------------------------
+// The ESP32 ADC + 47k source impedance introduces a consistent negative offset.
+// Bench measurement: ADC reports 7.70 V when true rail is 8.30 V.
+// Correction factor = 8.30 / 7.70 = 1.0779  (applied in readRailMilliVolts()).
+//
+// IMPORTANT: the trigger thresholds below are expressed as RAW (uncorrected)
+// millivolts, so that the physical trigger point stays correct after correction:
+//   threshold_raw = threshold_true / POWER_ADC_CORRECTION
+//   6819 = 7350 / 1.0779   <- fires when true rail = 7.35 V (unchanged physics)
+//   7190 = 7750 / 1.0779   <- recovers when true rail = 7.75 V (unchanged physics)
+// The displayed/logged voltage is always the corrected value.
+#define POWER_ADC_CORRECTION       1.0779f // multiply raw mV to get true rail mV
+
+#define POWER_THRESHOLD_LOW_MV     6819    // raw ADC trigger  (true rail ~7.35 V)
+#define POWER_THRESHOLD_HIGH_MV    7190    // raw ADC recover  (true rail ~7.75 V)
 #define POWER_STARTUP_GRACE_MS    10000    // ignore readings while supercaps charge
                                            // (was 3000 -- too short; AP needs ~500 ms to
                                            //  start, leaving almost no margin before the
@@ -168,10 +182,10 @@
 // cross-referencing with uptime-based debug prints.
 // supply_V column added: 9V-rail ADC reading at time of sample (0.0 when
 // PowerMonitor disabled or during startup grace).
-#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent,supply_V"
+#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent,supply_V,power_lost"
 
 // ===== RAM-Puffer =====
-// 64 x 16 Byte = 1024 Byte.
+// 64 x 20 Byte = 1280 Byte (Sample struct: 2x uint32 + 4x float + bool padding).
 // At 1 s cadence: 64 samples = 64 s of reserve before SD must flush.
 // INTERVAL_SD_FLUSH_MS = 10 s -> buffer only ever holds <= 10 samples normally.
 // 64 entries gives substantial margin if SD is temporarily unavailable.
