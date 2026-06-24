@@ -85,6 +85,7 @@ struct Sample {
   float    voltage_V;
   float    power_W;
   float    pf;          // stores pf_apparent in this firmware version
+  float    supply_V;    // 9V-rail in volts at time of sample (0.0 = monitor disabled)
 };
 
 class Logger {
@@ -104,6 +105,7 @@ public:
       _lastVoltage(NAN),
       _lastPower(NAN),
       _lastPf(NAN),
+      _lastSupplyV(0.0f),
       _sdOk(false),
       _otaInProgress(false),
       _pollIntervalMs(INTERVAL_SHELLY_POLL_MS),   // 1000 ms default
@@ -205,7 +207,7 @@ public:
           uts = (nowUts > secsAgo) ? (nowUts - secsAgo) : 0;
         }
 
-        pushSample({ millis_backdated, uts, V, P, PF });
+        pushSample({ millis_backdated, uts, V, P, PF, _lastSupplyV });
         Serial.printf("[Logger] batch sample (-%lu ms ago): V=%.1f P=%.1f\n",
                       (unsigned long)msAgo, V, P);
       }
@@ -223,7 +225,7 @@ public:
 
     if (P >= _powerThresholdW) {
       uint32_t uts = (_rtc != nullptr) ? (uint32_t)_rtc->now().unixtime() : 0;
-      pushSample({ now, uts, V, P, PF });
+      pushSample({ now, uts, V, P, PF, _lastSupplyV });
     }
   }
 
@@ -267,12 +269,13 @@ public:
       } else {
         snprintf(dtbuf, sizeof(dtbuf), "RTC_NOT_SET");
       }
-      f.printf("%s,%lu,%.1f,%.1f,%.2f\n",
+      f.printf("%s,%lu,%.1f,%.1f,%.2f,%.2f\n",
                dtbuf,
                (unsigned long)_buffer[i].millis_ts,
                _buffer[i].voltage_V,
                _buffer[i].power_W,
-               _buffer[i].pf);
+               _buffer[i].pf,
+               _buffer[i].supply_V);
     }
     f.flush();
     f.close();
@@ -308,8 +311,13 @@ public:
   float    getLastVoltage()    const { return _lastVoltage; }
   float    getLastPower()      const { return _lastPower; }
   float    getLastPf()         const { return _lastPf; }
+  float    getLastSupplyV()    const { return _lastSupplyV; }
   size_t   getBufferCount()    const { return _bufferCount; }
   uint32_t getDroppedSamples() const { return _droppedSamples; }
+
+  // Called from loop() after powerMonitor.update() -- stores latest rail
+  // voltage so pollIfDue() can stamp it into each Sample.
+  void setLastSupplyV(float v) { _lastSupplyV = v; }
 
   File openLogFileForRead() {
     if (!_sdOk) return File();
@@ -329,6 +337,7 @@ private:
   float         _lastVoltage;
   float         _lastPower;
   float         _lastPf;
+  float         _lastSupplyV;    // 9V-rail cached from PowerMonitor (V)
   bool          _sdOk;
   bool          _otaInProgress;   // true while WebPortal is writing OTA flash
   uint32_t      _pollIntervalMs;
