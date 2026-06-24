@@ -163,7 +163,9 @@ void handlePowerLoss() {
   Serial.println("[Power] *** SPANNUNGSABFALL erkannt (<7.35V) -- Notabschaltung ***");
 
   uint32_t t0 = millis();
-  logger.flushToSD();
+  float supplyV = powerMonitor.getCorrectedRailMilliVolts(
+                    powerMonitor.readRailMilliVolts()) / 1000.0f;
+  logger.flushPowerLost(supplyV);
   Serial.printf("[Power] SD-Flush abgeschlossen in %lu ms\n",
                 (unsigned long)(millis() - t0));
 
