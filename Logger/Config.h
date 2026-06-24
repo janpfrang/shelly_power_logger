@@ -137,7 +137,7 @@
 //   the softAP disappears before anyone can connect.
 // With this flag = 0, PowerMonitor::update() and isPowerLost() are
 // no-ops; all other firmware is completely unaffected.
-#define POWER_MONITOR_ENABLED      0       // <<<  set to 1 once HW circuit is built
+#define POWER_MONITOR_ENABLED      1       // <<<  set to 1 once HW circuit is built
 
 #define POWER_THRESHOLD_LOW_MV     7350    // trigger shutdown below this (mV, 9V rail)
 #define POWER_THRESHOLD_HIGH_MV    7750    // hysteresis: clear / recover above this (mV)
