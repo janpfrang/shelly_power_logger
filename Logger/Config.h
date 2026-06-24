@@ -166,7 +166,9 @@
 // (apower / (V x I)), not a direct hardware measurement.  See Req 5 / Req 7c.
 // datetime column added (RTC); time_ms kept for backward compatibility and
 // cross-referencing with uptime-based debug prints.
-#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent"
+// supply_V column added: 9V-rail ADC reading at time of sample (0.0 when
+// PowerMonitor disabled or during startup grace).
+#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent,supply_V"
 
 // ===== RAM-Puffer =====
 // 64 x 16 Byte = 1024 Byte.
@@ -177,6 +179,6 @@
 
 // ===== Webserver =====
 #define HTTP_PORT        80
-#define API_BUFFER_SIZE  320   // sufficient for /api/live incl. shelly_ok + ota_active (~146 chars worst-case)
+#define API_BUFFER_SIZE  320   // sufficient for /api/live incl. supply_mv/supply_ok (~175 bytes) shelly_ok + ota_active (~146 chars worst-case)
 
 #endif
