@@ -162,8 +162,8 @@ public:
     if (now - _lastCheckMs < POWER_CHECK_INTERVAL_MS) return;
     _lastCheckMs = now;
 
-    uint32_t railMv = readRailMilliVolts();
-    _lastRailMv = railMv;   // cache for getLastRailMilliVolts()
+    uint32_t railMv = readRailMilliVolts();           // raw
+    _lastRailMv = getCorrectedRailMilliVolts(railMv); // corrected, for display/log
 
     // Hysteresis + majority voting.
     if (railMv < POWER_THRESHOLD_LOW_MV) {
@@ -204,6 +204,8 @@ public:
 
   // Oversampled, factory-calibrated read of the 9V rail in millivolts.
   // Public so the shutdown idle loop can watch for mains recovery.
+  // Returns RAW (uncorrected) millivolts -- thresholds are also raw.
+  // Call getLastRailMilliVolts() for the corrected display/log value.
   uint32_t readRailMilliVolts() {
     uint32_t accMv = 0;
     for (uint8_t i = 0; i < POWER_ADC_SAMPLES; i++) {
@@ -215,12 +217,17 @@ public:
     uint32_t gpioMv = accMv / POWER_ADC_SAMPLES;       // mV at the pin
 
     // Undo the divider: V_rail = V_gpio * (R_TOP + R_BOTTOM) / R_BOTTOM.
-    // 64-bit intermediate avoids overflow (1800 * 227000 fits in 32-bit,
-    // but the cast keeps it safe if the resistors are ever changed bigger).
+    // 64-bit intermediate avoids overflow.
     uint32_t railMv = (uint32_t)(((uint64_t)gpioMv *
                        (DIVIDER_R_TOP_OHM + DIVIDER_R_BOTTOM_OHM)) /
                         DIVIDER_R_BOTTOM_OHM);
-    return railMv;
+    return railMv;   // RAW -- thresholds compare against this directly
+  }
+
+  // Returns the corrected (display-accurate) rail voltage in millivolts.
+  // Applies POWER_ADC_CORRECTION to compensate for ADC + source-impedance offset.
+  uint32_t getCorrectedRailMilliVolts(uint32_t rawMv) const {
+    return (uint32_t)(rawMv * POWER_ADC_CORRECTION);
   }
 
 private:
