@@ -1,29 +1,31 @@
 /**
- * shelly_push.js  –  Shelly Plug S MTR Gen3  •  Firmware Script  v4
+ * shelly_push.js  -  Shelly Plug S MTR Gen3  -  Firmware Script  v5
  * ==================================================================
+ *
+ * Changes vs. v4
+ * --------------
+ *   FIXED    HTTP timeout raised from 1 s to 2 s in both the single-sample
+ *            and batch POST paths.
+ *
+ *            Root cause of observed 2 s log gaps:
+ *            The ESP32 SD flush (flushIfDue, every 10 s) blocks the HTTP
+ *            response handler for 50-200 ms.  With timeout=1 s, any push
+ *            that arrived near a flush boundary exceeded the 1 s window,
+ *            causing the Shelly to treat it as a dropout, set _connected=false,
+ *            and send a batch POST on the next tick.  The ESP32 drains the
+ *            batch one sample per pollIfDue() tick (1 s each), producing a
+ *            visible 2 s gap in the CSV log every ~10 s.
+ *            With timeout=2 s the flush latency is always absorbed.
+ *            The _pushPending guard still prevents HTTP call stacking.
+ *
+ *   FIXED    Switch.Set on startup now correctly sets relay ON (was OFF).
+ *            The relay was being turned OFF 3 s after every script start,
+ *            cutting power to the load on every ESP32 reboot.
  *
  * Changes vs. v3
  * --------------
- *   FIXED    bufferSample() — replaced _buf.shift() with mJS-compatible loop
- *
- *            Root cause of "Uncaught Error: Function 'shift' not found":
- *            Shelly uses mJS (Mongoose JS), a minimal embedded JS engine.
- *            Array.shift() is NOT implemented in mJS. The crash was silent
- *            during normal operation (buffer stays at length 1) but triggered
- *            reliably after 10 consecutive failed POSTs (BUFFER_MAX reached),
- *            which happens on every autostart while the ESP32 AP is not yet
- *            visible, and during any mid-operation WiFi dropout > 10 s.
- *
- *            Fix: rebuild the array manually using a for-loop and push().
- *            Both Array.push() and Array.length are confirmed available in mJS.
- *
+ *   FIXED    bufferSample() - replaced _buf.shift() with mJS-compatible loop
  *   FIXED    Startup Switch.Set call now wrapped in a 3 s one-shot timer
- *            so the Switch subsystem is guaranteed to be ready before we
- *            touch it. Calling Switch.Set too early after boot caused
- *            "unknown error" on autostart.
- *
- *   UNCHANGED  All CONFIG constants, doPush(), readSample(), HTTP payload
- *              formats, batch/single-sample routing — byte-for-byte identical.
  *
  * mJS COMPATIBILITY NOTES
  * -----------------------
@@ -38,24 +40,24 @@
  * Only change the constants in the CONFIG block below.
  */
 
-// ─── CONFIG ──────────────────────────────────────────────────────────────────
+// --- CONFIG ------------------------------------------------------------------
 
 var PUSH_INTERVAL_MS = 1000;          // Must match ESP32 INTERVAL_SHELLY_POLL_MS
-var ESP32_IP         = "192.168.4.1"; // ESP32 softAP gateway — fixed IP
+var ESP32_IP         = "192.168.4.1"; // ESP32 softAP gateway - fixed IP
 var PUSH_URL         = "http://" + ESP32_IP + "/api/shelly_push";
 var SWITCH_ID        = 0;             // Plug S has a single switch channel
 
 var RELAY_DELAY_MS   = 2000;          // ms after script start before relay turns on
 var BUFFER_MAX       = 10;            // max samples held offline (sliding window)
 
-// ─── STATE ───────────────────────────────────────────────────────────────────
+// --- STATE -------------------------------------------------------------------
 
-var _pushPending = false; // guard: don't stack HTTP calls if ESP32 is slow
-var _connected   = false; // true after first successful HTTP 200 from ESP32
-var _relayOn     = false; // true after RELAY_DELAY_MS has elapsed
-var _buf         = [];    // offline sample ring buffer
+var _pushPending = false;
+var _connected   = false;
+var _relayOn     = false;
+var _buf         = [];
 
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
+// --- HELPERS -----------------------------------------------------------------
 
 function roundTo(val, decimals) {
   var m = 1;
@@ -64,10 +66,6 @@ function roundTo(val, decimals) {
   return Math.round(val * m) / m;
 }
 
-/**
- * Read the current Switch measurement and return a sample object,
- * or null if the hardware reading is not yet available.
- */
 function readSample() {
   var sw = Shelly.getComponentStatus("switch", SWITCH_ID);
   if (!sw) { return null; }
@@ -101,17 +99,8 @@ function readSample() {
   };
 }
 
-/**
- * Append sample to the offline buffer.
- * If BUFFER_MAX is reached, drop the oldest entry (sliding window).
- *
- * NOTE: Array.shift() is NOT available in Shelly mJS — replaced with
- *       a manual for-loop that rebuilds the array without the first element.
- */
 function bufferSample(s) {
   if (_buf.length >= BUFFER_MAX) {
-    // mJS-compatible replacement for _buf.shift():
-    // copy elements [1..end] into a new array, then replace _buf.
     var tmp = [];
     var i;
     for (i = 1; i < _buf.length; i++) {
@@ -122,21 +111,18 @@ function bufferSample(s) {
   _buf.push(s);
 }
 
-// ─── CORE PUSH FUNCTION ───────────────────────────────────────────────────────
+// --- CORE PUSH FUNCTION ------------------------------------------------------
 
 function doPush() {
-  // ── 1. Relay delay ─────────────────────────────────────────────────────────
+
+  // 1. Relay delay
   if (!_relayOn && Shelly.getUptimeMs() >= RELAY_DELAY_MS) {
     Shelly.call("Switch.Set", { id: SWITCH_ID, on: true }, null);
     _relayOn = true;
     print("[shelly_push] relay ON after", RELAY_DELAY_MS, "ms delay");
   }
 
-  // ── 2. Always sample and buffer ────────────────────────────────────────────
-  // The buffer is cleared only on a confirmed HTTP 200. This means:
-  //   • Startup:          _buf grows until first successful batch POST.
-  //   • Normal operation: _buf holds exactly 1 sample; cleared each tick.
-  //   • Dropout:          _buf grows (sliding window) until reconnect.
+  // 2. Always sample and buffer
   var s = readSample();
   if (!s) {
     print("[shelly_push] measurement unavailable, skipping");
@@ -144,87 +130,74 @@ function doPush() {
   }
   bufferSample(s);
 
-  // ── 3. Guard: only one HTTP request in flight at a time ────────────────────
+  // 3. Guard: only one HTTP request in flight at a time
   if (_pushPending) {
     print("[shelly_push] skipping tick - previous request still pending");
     return;
   }
 
-  // ── 4. Send buffer (single-sample fast path or batch) ──────────────────────
-  // Single-sample when already connected and buffer has exactly 1 entry.
-  // Batch on startup, dropout recovery, or any buffer length > 1.
-
+  // 4a. Normal operation: single-sample POST (fast path)
   if (_connected && _buf.length === 1) {
-    // ── 4a. Normal operation: single-sample POST (fast path) ─────────────────
     var body = JSON.stringify(s);
     _pushPending = true;
-
     Shelly.call(
       "HTTP.Request",
       {
         method:  "POST",
         url:     PUSH_URL,
-        headers: {"Content-Type": "application/json"},
+        headers: { "Content-Type": "application/json" },
         body:    body,
-        timeout: 1
+        timeout: 2
       },
       function(result, error_code, error_msg) {
         _pushPending = false;
         if (error_code === 0 && result && result.code === 200) {
-          _buf = [];   // confirmed delivered — discard
+          _buf = [];
         } else {
-          // Dropout detected: re-enter offline mode so next tick buffers
-          // and attempts a batch recovery POST.
           _connected = false;
-          print("[shelly_push] dropout detected, buffering:", error_code, error_msg);
+          print("[shelly_push] dropout:", error_code, error_msg);
         }
       }
     );
-
-  } else {
-    // ── 4b. Offline or dropout recovery: batch POST ───────────────────────────
-    var batchBody = JSON.stringify({ batch: _buf });
-    _pushPending = true;
-
-    Shelly.call(
-      "HTTP.Request",
-      {
-        method:  "POST",
-        url:     PUSH_URL,
-        headers: {"Content-Type": "application/json"},
-        body:    batchBody,
-        timeout: 1
-      },
-      function(result, error_code, error_msg) {
-        _pushPending = false;
-        if (error_code === 0 && result && result.code === 200) {
-          _connected = true;
-          _buf = [];   // ESP32 has all buffered samples — discard
-          print("[shelly_push] (re)connected, batch delivered");
-        } else {
-          // Still offline — keep buffering, try again next tick
-          print("[shelly_push] batch attempt failed:", error_code, error_msg);
-        }
-      }
-    );
+    return;
   }
+
+  // 4b. Startup / dropout recovery: batch POST
+  var batchBody = JSON.stringify({ batch: _buf });
+  _pushPending = true;
+  Shelly.call(
+    "HTTP.Request",
+    {
+      method:  "POST",
+      url:     PUSH_URL,
+      headers: { "Content-Type": "application/json" },
+      body:    batchBody,
+      timeout: 2
+    },
+    function(result, error_code, error_msg) {
+      _pushPending = false;
+      if (error_code === 0 && result && result.code === 200) {
+        _connected = true;
+        _buf = [];
+        print("[shelly_push] (re)connected, batch delivered");
+      } else {
+        print("[shelly_push] batch failed:", error_code, error_msg);
+      }
+    }
+  );
 }
 
-// ─── STARTUP ─────────────────────────────────────────────────────────────────
+// --- STARTUP -----------------------------------------------------------------
 
-print("[shelly_push] v4 starting - relay delay:", RELAY_DELAY_MS,
+print("[shelly_push] v5 starting - interval:", PUSH_INTERVAL_MS,
       "ms, buffer:", BUFFER_MAX, "samples");
 
-// Defer Switch.Set by 3 s so the Switch subsystem is fully initialised
-// before we touch it. Calling Switch.Set immediately at script start
-// causes "unknown error" on autostart because the relay driver is not
-// yet ready when mJS begins executing.
+// Defer Switch.Set by 3 s so the Switch subsystem is fully initialised.
 Timer.set(3000, false, function() {
-  Shelly.call("Switch.Set", { id: SWITCH_ID, on: false }, null);
+  Shelly.call("Switch.Set", { id: SWITCH_ID, on: true }, null);
 }, null);
 
-// Start the main push loop after the same 3 s delay so the first
-// doPush() tick also runs on a fully initialised switch component.
+// Start the main push loop after the same 3 s delay.
 Timer.set(3000, false, function() {
   Timer.set(PUSH_INTERVAL_MS, true, doPush, null);
 }, null);
