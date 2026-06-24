@@ -1,15 +1,14 @@
 /*
- * WebPortal.h v8  (Shelly + ESP32 + OTA + RTC set-time)
- * =======================================================
+ * WebPortal.h v9  (Shelly + ESP32 + OTA + RTC set-time + supply voltage display)
+ * ================================================================================
  *
- * Changes vs. v7 (Shelly + ESP32 + OTA):
- *   ADDED    #include <RTClib.h>
- *   CHANGED  Constructor: third parameter RTC_DS3231* rtc = nullptr
- *   ADDED    _rtc member (RTC_DS3231*)
- *   ADDED    handleApiSetRtc()   -- POST /api/set_rtc
- *   ADDED    route registration  POST /api/set_rtc  in begin()
- *   CHANGED  PAGE_SETTINGS       -- "Set RTC Time" card added
- *   CHANGED  PAGE_INDEX          -- RTC time display added to status card
+ * Changes vs. v8:
+ *   ADDED    #include "PowerMonitor.h"
+ *   CHANGED  Constructor: fourth parameter PowerMonitor* pm = nullptr
+ *   ADDED    _pm member (PowerMonitor*)
+ *   CHANGED  handleApiLive() -- adds "supply_mv" field to JSON
+ *   CHANGED  PAGE_INDEX      -- "Versorg.: xx.x V" badge next to Shelly/SD,
+ *                               highlighted red on undervoltage
  *   UNCHANGED: all other routes, pages, handlers
  *
  * SET-RTC FLOW
@@ -41,24 +40,26 @@
 #include "Config.h"
 #include "Logger.h"
 #include "ShellyClient.h"
+#include "PowerMonitor.h"
 
 class WebPortal {
 public:
   // Logger and ShellyClient are injected (required).
   // RTC_DS3231 is optional: pass nullptr when the RTC is absent.
-  // Keeping nullptr as default preserves backward-compatibility if any
-  // test harness constructs WebPortal without an RTC.
-  WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc = nullptr);
+  // PowerMonitor is optional: pass nullptr when the 9V circuit is absent.
+  WebPortal(Logger& logger, ShellyClient& shelly,
+            RTC_DS3231* rtc = nullptr, PowerMonitor* pm = nullptr);
 
   bool begin();
   void update();
 
 private:
-  Logger&       _logger;
-  ShellyClient& _shelly;
-  RTC_DS3231*   _rtc;        // optional -- nullptr means no RTC available
-  WebServer     _server;
-  DNSServer     _dns;
+  Logger&        _logger;
+  ShellyClient&  _shelly;
+  RTC_DS3231*    _rtc;        // optional -- nullptr means no RTC available
+  PowerMonitor*  _pm;         // optional -- nullptr means no 9V monitor circuit
+  WebServer      _server;
+  DNSServer      _dns;
 
   // -- Page handlers (unchanged from v7) ------------------------------------
   void handleRoot();
