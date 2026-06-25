@@ -1,6 +1,37 @@
 /*
- * Logger.h v7  (Shelly + ESP32 + OTA-aware + DS3231 RTC)
- * ==========================================
+ * Logger.h v8  (Shelly + ESP32 + OTA-aware + DS3231 RTC + supply monitoring)
+ * ===========================================================================
+ *
+ * Changes vs. v7
+ * --------------
+ *   CHANGED  Sample struct -- added float supply_V and uint8_t power_down.
+ *              supply_V:    9V-rail voltage at the time of the sample (V, 2 dp).
+ *                           Single analogReadMilliVolts() call, NOT the 16x
+ *                           oversampled read in PowerMonitor -- sufficient for
+ *                           CSV documentation, not the safety-critical path.
+ *              power_down:  0 = rail above threshold / normal.
+ *                           1 = PowerMonitor has latched an undervoltage event.
+ *                           The 1-samples are the last entries before the
+ *                           graceful shutdown flush -- exactly the interesting
+ *                           moments in the CSV.
+ *   CHANGED  pollIfDue()  -- reads PIN_VSUPPLY once per poll tick and reads
+ *                           powerMonitor.isPowerLost() state; populates both
+ *                           new fields in every pushed Sample.
+ *              RAM cost: +5 bytes/sample (float=4 + uint8_t=1). 64 samples
+ *              = +320 bytes.  ESP32 has 320 kB SRAM -- negligible.
+ *              Time cost: one analogReadMilliVolts() ≈ 70 µs, once per second.
+ *              Both costs are immaterial.
+ *   CHANGED  flushToSD()  -- format string extended: "...%.2f,%u\n" for the
+ *                           two new columns.
+ *   CHANGED  LOG_FILE_HEADER -- 'supply_V,power_down' appended (Config.h).
+ *
+ *   COMPATIBILITY NOTE (existing log.csv files):
+ *              ensureLogHeader() only writes a header if the file does NOT
+ *              exist.  A pre-existing log.csv will get new 7-column rows
+ *              appended after old 5-column rows -- the header won't match.
+ *              Fix: call POST /reset via the WebPortal once after flashing.
+ *              A Serial warning is printed by ensureLogHeader() if it detects
+ *              a file already exists when this firmware version boots.
  *
  * Changes vs. v5
  * --------------
@@ -70,19 +101,25 @@
 struct Sample {
   uint32_t millis_ts;   // ESP32 uptime ms at time of sample
   uint32_t unix_ts;     // UTC epoch from DS3231 (0 = RTC absent/not set)
-  float    voltage_V;
-  float    power_W;
+  float    voltage_V;   // mains voltage from Shelly (V RMS)
+  float    power_W;     // active power from Shelly (W)
   float    pf;          // stores pf_apparent in this firmware version
+  float    supply_V;    // 9V-rail voltage at sample time (V, single ADC read)
+  uint8_t  power_down;  // 0=normal, 1=undervoltage latched by PowerMonitor
 };
 
 class Logger {
 public:
   // ShellyClient is injected; RTC_DS3231 is optional (nullptr = no RTC).
-  // Keeping the RTC as a pointer with a default preserves the single-argument
-  // call signature used by the unit-test double: Logger(sc).
-  explicit Logger(ShellyClient& shelly, RTC_DS3231* rtc = nullptr)
+  // powerLostPtr: pointer to PowerMonitor::isPowerLost() latch flag, injected
+  //   from the .ino so Logger can read it without depending on PowerMonitor.h.
+  //   Pass nullptr (default) when POWER_MONITOR_ENABLED == 0 or in unit tests.
+  explicit Logger(ShellyClient& shelly,
+                  RTC_DS3231*   rtc           = nullptr,
+                  const bool*   powerLostPtr  = nullptr)
     : _shelly(shelly),
       _rtc(rtc),
+      _powerLostPtr(powerLostPtr),
       _sdSPI(VSPI),
       _bufferCount(0),
       _droppedSamples(0),
@@ -173,12 +210,29 @@ public:
     _lastPower   = P;
     _lastPf      = PF;
 
+    // Single (non-oversampled) ADC read of the 9V rail for the CSV column.
+    // PowerMonitor uses 16x oversampling for the safety decision; one read
+    // here is sufficient for logging purposes (±0.3 V is fine for post-
+    // processing -- the exact trigger voltage is not needed).
+    // When POWER_MONITOR_ENABLED == 0 the circuit is absent; PIN_VSUPPLY
+    // floats, so we log 0.0 V as a clear "not populated" sentinel.
+#if POWER_MONITOR_ENABLED
+    uint32_t _supplyMv = analogReadMilliVolts(PIN_VSUPPLY);
+    float supplyV = (float)(((uint64_t)_supplyMv *
+                    (DIVIDER_R_TOP_OHM + DIVIDER_R_BOTTOM_OHM)) /
+                    DIVIDER_R_BOTTOM_OHM) / 1000.0f;
+    uint8_t pdFlag = (_powerLostPtr != nullptr && *_powerLostPtr) ? 1 : 0;
+#else
+    float   supplyV = 0.0f;
+    uint8_t pdFlag  = 0;
+#endif
+
     // Apply logging threshold (Req 8): only store sample if P >= threshold
     if (P >= _powerThresholdW) {
       // Capture wall-clock time from DS3231. Returns 0 when RTC is absent
       // or has lost power -- CSV writes 'RTC_NOT_SET' for those rows.
       uint32_t uts = (_rtc != nullptr) ? (uint32_t)_rtc->now().unixtime() : 0;
-      pushSample({ now, uts, V, P, PF });
+      pushSample({ now, uts, V, P, PF, supplyV, pdFlag });
     }
   }
 
@@ -232,12 +286,14 @@ public:
       } else {
         snprintf(dtbuf, sizeof(dtbuf), "RTC_NOT_SET");
       }
-      _logFile.printf("%s,%lu,%.1f,%.1f,%.2f\n",
+      _logFile.printf("%s,%lu,%.1f,%.1f,%.2f,%.2f,%u\n",
                dtbuf,
                (unsigned long)_buffer[i].millis_ts,
                _buffer[i].voltage_V,
                _buffer[i].power_W,
-               _buffer[i].pf);
+               _buffer[i].pf,
+               _buffer[i].supply_V,
+               (unsigned)_buffer[i].power_down);
     }
 
     _logFile.flush();   // commit to SD -- this is the blocking call
@@ -308,8 +364,9 @@ public:
   void reopenAfterRead() { _openLogFile(); }
 
 private:
-  ShellyClient& _shelly;      // injected reference -- not owned
-  RTC_DS3231*   _rtc;         // optional injected pointer -- not owned (nullptr = no RTC)
+  ShellyClient& _shelly;        // injected reference -- not owned
+  RTC_DS3231*   _rtc;           // optional injected pointer -- not owned (nullptr = no RTC)
+  const bool*   _powerLostPtr;  // points to PowerMonitor latch flag; nullptr = no monitor
   SPIClass      _sdSPI;
   File          _logFile;     // persistent write handle -- opened once, never closed between flushes
   Sample        _buffer[RAM_BUFFER_SIZE];
@@ -385,6 +442,11 @@ private:
 };
 
 // Called once from setup() to ensure the log file has a header row.
+// COMPATIBILITY WARNING: If a pre-existing log.csv is found (from an older
+// firmware version with fewer columns), this function does NOT rewrite the
+// header. New 7-column rows will be appended after old 5-column rows, making
+// the file inconsistent. Solution: call POST /reset via the WebPortal once
+// after flashing this firmware version.
 inline void ensureLogHeader() {
   if (!SD.exists(LOG_FILE_PATH)) {
     File f = SD.open(LOG_FILE_PATH, FILE_WRITE);
@@ -392,6 +454,12 @@ inline void ensureLogHeader() {
       f.println(LOG_FILE_HEADER);
       f.close();
     }
+  } else {
+    // File already exists -- warn that it may have been written by an older
+    // firmware version with a different column layout.
+    Serial.println("[Logger] HINWEIS: log.csv existiert bereits. Falls von einer");
+    Serial.println("[Logger]          aelteren Firmware-Version: bitte /reset ausfuehren,");
+    Serial.println("[Logger]          da neue Spalten (supply_V, power_down) hinzukamen.");
   }
 }
 
