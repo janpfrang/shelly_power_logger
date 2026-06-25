@@ -1092,6 +1092,7 @@ void WebPortal::handleDownload() {
   _server.sendHeader("Content-Disposition", "attachment; filename=log.csv");
   _server.streamFile(f, "text/csv");
   f.close();
+  _logger.reopenAfterRead();
 }
 
 void WebPortal::handleReset() {
