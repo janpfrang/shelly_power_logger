@@ -168,7 +168,13 @@
 // (apower / (V x I)), not a direct hardware measurement.  See Req 5 / Req 7c.
 // datetime column added (RTC); time_ms kept for backward compatibility and
 // cross-referencing with uptime-based debug prints.
-#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent"
+// supply_V:    9V-rail voltage measured on GPIO 35 at sample time (V, 2 dp).
+//              Single analogReadMilliVolts() -- not the 16x oversampled safety
+//              read in PowerMonitor. 0.00 when POWER_MONITOR_ENABLED == 0.
+// power_down:  0 = normal operation, 1 = undervoltage latch triggered.
+//              Rows with power_down=1 are the last samples before the graceful
+//              shutdown flush -- the exact moment of mains loss is visible.
+#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent,supply_V,power_down"
 
 // Maximum time allowed for a single flushToSD() call (ms).
 // If _logFile.flush() (the SD sync) takes longer than this the card is
