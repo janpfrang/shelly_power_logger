@@ -1,199 +1,214 @@
 /*
- * Config.h - Zentrale Konfiguration v10  (Shelly + ESP32 + OTA + Power-loss + RTC)
- * ===============================================================================
+ * PowerMonitor.h  -  9V-rail loss detection  (v2)
+ * =================================================
  *
- * Changes vs. v9:
- *   CHANGED  POWER_MONITOR_ENABLED  0 -> 1
- *              9V rail + supercapacitor + resistor-divider circuit (R1=180k, R2=47k)
- *              is now fully populated on the PCB.  Undervoltage sensing on GPIO 35
- *              is active again (Req 13).
- *              The 10 s startup grace (POWER_STARTUP_GRACE_MS) and majority-voting
- *              (POWER_MAJORITY_COUNT=3) remain as protection against false triggers
- *              during WiFi-AP startup and ADC noise during SD writes / Shelly pushes.
+ * Changes vs. v1
+ * --------------
+ *   ADDED  POWER_MONITOR_ENABLED guard in update() and isPowerLost().
+ *          When Config.h sets POWER_MONITOR_ENABLED = 0 (hardware circuit
+ *          not yet populated), both methods become no-ops so the rest of
+ *          the firmware is completely unaffected.
+ *          Root cause of the WiFi-not-visible bug: GPIO 35 floated to 0 V
+ *          when the divider resistors were absent, readRailMilliVolts()
+ *          returned 0 mV (well below the 7350 mV threshold), and
+ *          handlePowerLoss() was called within ~600 ms of boot, executing
+ *          WiFi.mode(WIFI_OFF) before the softAP was visible to clients.
  *
- * Changes vs. v7 (Shelly + ESP32 + OTA + Power-loss):
- *   ADDED    POWER_MONITOR_ENABLED  -- set to 0 to disable the power-loss
- *              watchdog entirely when the 9V/supercap circuit is not yet
- *              populated.  This was the root cause of the WiFi-not-visible bug:
- *              GPIO 35 floats to 0 V when the divider resistors are absent,
- *              which reads as railMv = 0 -- below the 7350 mV threshold --
- *              triggering handlePowerLoss() within ~600 ms of boot and
- *              calling WiFi.mode(WIFI_OFF) before the AP was ever visible.
- *   CHANGED  POWER_STARTUP_GRACE_MS  3000 -> 10000 ms
- *              Even with the circuit populated the old 3 s grace was too short:
- *              webPortal.begin() (WiFi.softAP) can take 200-500 ms, and the
- *              first loop() iterations consumed the remaining grace window
- *              before the AP was fully established.  10 s is safe for all
- *              hardware states.
- *   ALL other constants unchanged
+ * PURPOSE  (Req 13: "allows safe flush of memory if the power connection
+ * is determined / lost")
+ * ----------------------------------------------------------------------
+ * Watches the 9 V supply rail through the resistor divider on GPIO 35.
+ * When mains is lost the supercap bank (2 x 1 F in series = 0.5 F) holds
+ * the rail up for several seconds.  This module detects the decay early,
+ * tells the sketch to flush the SD card, and then the sketch sheds load
+ * and idles until the hardware brownout reset finishes the job.
+ *
+ * DESIGN SPLIT
+ * ------------
+ * PowerMonitor is a *detector only*.  It does NOT touch the SD card, Wi-Fi
+ * or the LED -- that orchestration lives in the .ino (handlePowerLoss()),
+ * exactly like the Logger / ShellyClient / WebPortal single-responsibility
+ * split.  This keeps the threshold logic testable in isolation.
+ *
+ *   loop():  powerMonitor.update();
+ *            if (powerMonitor.isPowerLost()) handlePowerLoss();   // terminal
+ *
+ * CIRCUIT
+ * -------
+ *     9V rail --[ R_TOP 180k ]--+--[ R_BOTTOM 47k ]-- GND
+ *                               |
+ *                            GPIO 35  (ADC1_CH7)
+ *
+ *   V_gpio = V_rail * R_BOTTOM / (R_TOP + R_BOTTOM) = V_rail * 0.2070
+ *   readRailMilliVolts() measures the pin and multiplies back up so the
+ *   rest of the firmware works in real 9V-rail millivolts.
+ *
+ * THRESHOLD  (7.35 V, not 6.8 V -- deliberate)
+ * --------------------------------------------
+ * Power chain:  9V rail -> TSR-1-2450 (->5V) -> ESP32 LDO (->3.3V) -> ADC Vref.
+ * The TSR-1-2450 buck regulator drops out at ~6.5 V input; below that the
+ * 3.3 V rail (and therefore the ADC reference) sag, so the ADC reading
+ * becomes meaningless at exactly the moment we would need it.
+ * Triggering at 7.35 V keeps the WHOLE worst-case ADC error window
+ * (~+/-0.3 V) above the 6.5 V regulator cliff:
+ *
+ *     8.7 V  nominal
+ *     7.75 V  <- POWER_THRESHOLD_HIGH_MV  (hysteresis clear / recover)
+ *     7.35 V  <- POWER_THRESHOLD_LOW_MV   (trigger)
+ *     7.07 V  worst-case late trigger  (still > cliff)  OK
+ *     6.50 V  TSR-1-2450 cliff  -- ADC no longer trustworthy
+ *     5.50 V  ESP32 brownout reset
+ *
+ * Capacitor budget (0.5 F, ~150 mA draw):
+ *   mains loss -> 7.35 V : ~4.5 s   (detection window)
+ *   7.35 V -> 6.5 V cliff : ~2.8 s   (clean action window, SD flush is <0.5 s)
+ *   7.35 V -> 5.5 V brownout : ~6.2 s (total)
+ *
+ * ADC NON-LINEARITY HANDLING (no temperature sensor, by request)
+ * --------------------------------------------------------------
+ * Three independent error sources, handled as well as software allows:
+ *
+ *   1. Offset + INL  -> analogReadMilliVolts() applies the chip's factory
+ *      eFuse calibration (per-unit offset + a piecewise curve correction).
+ *      This is the single biggest win and needs no extra hardware.
+ *      The working point (~1.5 V at the pin) sits in the ADC's most linear
+ *      region (0.8-2.5 V), where residual INL is smallest.
+ *
+ *   2. WiFi noise on ADC1  -> oversampling.  POWER_ADC_SAMPLES reads are
+ *      averaged; random noise falls ~1/sqrt(N) (N=16 -> ~4x reduction).
+ *
+ *   3. Transients / load spikes  -> majority voting.  POWER_MAJORITY_COUNT
+ *      consecutive below-threshold checks are required before triggering,
+ *      so a single SD-write or Wi-Fi burst dip cannot fire the shutdown.
+ *
+ * The 0.40 V hysteresis gap (7.35 / 7.75) is wider than the residual
+ * error budget, which prevents chatter around the threshold.
+ *
+ * HARDWARE CAVEAT
+ * ---------------
+ * The 47 k bottom resistor is a fairly high source impedance for the ESP32
+ * ADC sample-and-hold (it prefers < ~10-20 k).  This can add a small
+ * settling offset.  The factory calibration + oversampling absorb most of
+ * it, but if bench tests show a consistent bias, add a 100 nF capacitor
+ * from GPIO 35 to GND -- it lowers the AC source impedance without changing
+ * the (slow) mains-loss detection.
+ *
+ * STARTUP
+ * -------
+ * The supercaps take ~1-2 s to charge after power-on, during which the rail
+ * sits below 7.35 V and would look exactly like a power loss.  begin()
+ * starts a POWER_STARTUP_GRACE_MS window during which update() reads nothing
+ * and never triggers.  Because the ESP32 bootloader already burned ~1-2 s
+ * before setup() runs, the effective grace from cold power-on is ~4-5 s --
+ * comfortably longer than the cap charge time.
  */
 
-#ifndef CONFIG_H
-#define CONFIG_H
+#ifndef POWER_MONITOR_H
+#define POWER_MONITOR_H
 
-// ===== Pin-Belegung ESP32-WROOM =====
-// GPIO 16/17 (PZEM UART) are now free -- do not assign here to avoid confusion.
-#define PIN_SD_CS       25
-#define PIN_SD_MOSI     14
-#define PIN_SD_CLK      27
-#define PIN_SD_MISO     26
-#define PIN_LED         32
-#define PIN_VSUPPLY     35   // ADC1_CH7 -- 9V-rail monitor for power-loss flush (Req 13)
-// GPIO 33 is reserved for a future manual-reset button (Req 25/26).
-// It is intentionally NOT defined here: defining a pin that no code reads
-// is dead code. Add the #define together with the handler that uses it.
+#include <Arduino.h>
+#include "Config.h"
 
+class PowerMonitor {
+public:
+  PowerMonitor()
+    : _graceActive(true),
+      _startupMs(0),
+      _lastCheckMs(0),
+      _belowCount(0),
+      _powerLost(false)
+  {}
 
-// ===== DS3231 RTC (I2C) =====
-// Hardware I2C bus 0 — dedicated SDA/SCL pins on ESP32-WROOM-32.
-// 4.7 kΩ pull-ups to 3.3 V recommended on both lines.
-// Do NOT connect VCC to 5 V.
-#define PIN_RTC_SDA     21   // I2C SDA (Wire default)
-#define PIN_RTC_SCL     22   // I2C SCL (Wire default)
+  // Configure the ADC for the GPIO 35 divider tap.
+  // Call once from setup() -- this also starts the startup grace clock.
+  void begin() {
+    analogReadResolution(12);                          // 0..4095
+    analogSetPinAttenuation(PIN_VSUPPLY, ADC_11db);    // ~0..3.3 V usable range
+    _startupMs   = millis();
+    _graceActive = true;
+    _belowCount  = 0;
+    _powerLost   = false;
+    Serial.printf("[Power] Init -- Trigger < %d mV, Recover > %d mV (9V-Rail), "
+                  "Grace %d ms\n",
+                  POWER_THRESHOLD_LOW_MV, POWER_THRESHOLD_HIGH_MV,
+                  POWER_STARTUP_GRACE_MS);
+  }
 
-// ===== Shelly Plug S MTR Gen3 =====
-// The Shelly joins the ESP32 softAP as a STA client.
-// 192.168.4.1 is the fixed ESP32 AP gateway IP -- the Shelly always uses this
-// as its push target.  The ESP32 finds the Shelly at the IP assigned by its
-// own DHCP server.  Using mDNS ("shellyplugsg3-XXXXXX.local") is an
-// alternative if your router assigns stable leases; IP is more portable.
-//
-// If you change the AP SSID/password below you must also re-provision the
-// Shelly's STA Wi-Fi settings to match.
-#define SHELLY_HOST             "192.168.4.2"    // First DHCP lease from ESP32 AP
-                                                  // Change to mDNS name if preferred:
-                                                  // "shellyplugsg3-XXXXXX.local"
-#define SHELLY_PUSH_ENDPOINT    "/api/shelly_push"  // Must match shelly_push.js PUSH_URL
-#define OTA_ENDPOINT            "/update"            // Must match WebPortal route registration
-
-// Shelly push watchdog: if no push is received for this many consecutive
-// expected intervals, the Shelly is declared unreachable (-> LED_ERROR).
-// 5 x 1000 ms = 5 s silence window.
-//
-// Why 5 and not 3:
-//   a) The Shelly mJS timer is NOT compensated — each doPush() fires 1000 ms
-//      after the *previous callback completes*, not after it was scheduled.
-//      doPush() itself takes a few ms, so the real cadence is ~1005-1010 ms.
-//      After 3 pushes the accumulated drift can exceed the 3 s window, tripping
-//      the watchdog even with a perfect WiFi link.
-//   b) shelly_push.js uses PUSH_INTERVAL_MS = 1200 ms (200 ms margin over the
-//      HTTP timeout) so the steady-state push cadence is ~1200 ms. At threshold
-//      3 the window would be only 3000 ms — leaving room for only 2.5 pushes.
-//      At threshold 5 the window is 5000 ms — 4 full pushes at 1200 ms cadence
-//      before the watchdog fires.  That is the right safety margin.
-//   c) flushToSD() can block loop() for up to SD_FLUSH_TIMEOUT_MS (400 ms).
-//      With threshold 3 a single slow flush consumed 40 % of the watchdog budget.
-#define SHELLY_ERROR_THRESHOLD   5
-
-// Startup grace for the Shelly watchdog (ms).
-// When the ESP32 boots after the Shelly is already running, the softAP takes
-// ~1-2 s to appear and the Shelly's WiFi client needs another 3-10 s to
-// re-associate. During that window no pushes arrive and the 3 s watchdog
-// would trip immediately. ShellyClient suppresses shellyOk()=false for this
-// many ms after the first-ever successful push, giving the link time to
-// stabilise without loosening the steady-state watchdog.
-#define SHELLY_STARTUP_GRACE_MS  15000
-
-// ===== Zeitintervalle (ms) =====
-// INTERVAL_SHELLY_POLL_MS is the EXPECTED push cadence from shelly_push.js.
-// The ESP32 uses this value:
-//   a) as the watchdog timeout multiplier (SHELLY_ERROR_THRESHOLD x this)
-//   b) as the default value returned by /api/settings  (Req 21 rate selector)
-//   c) as the minimum allowed rate on the Settings page
-//
-// Shelly's internal energy meter updates at ~1 Hz.  Pushing faster returns
-// stale values.  Minimum meaningful value: 1000 ms.
-#define INTERVAL_SHELLY_POLL_MS   1000   // default 1 s; adjustable via /api/settings
-#define INTERVAL_SD_FLUSH_MS     10000   // flush RAM buffer to SD every 10 s (unchanged)
-#define INTERVAL_LED_OK_MS         500   // 1 Hz blink when system OK  (unchanged)
-#define INTERVAL_LED_ERR_MS        100   // 5 Hz blink on error        (unchanged)
-
-// ===== Versorgungs-Ueberwachung / Power-loss detection (Req 13) =====
-// GPIO 35 (PIN_VSUPPLY) reads the 9 V rail through a resistor divider:
-//
-//     9V rail --[ R_TOP 180k ]--+--[ R_BOTTOM 47k ]-- GND
-//                               |
-//                            GPIO 35 (ADC1_CH7)
-//
-//   V_gpio = V_rail * R_BOTTOM / (R_TOP + R_BOTTOM) = V_rail * 0.2070
-//   PowerMonitor multiplies the measured pin voltage back up to recover the
-//   rail voltage, so the thresholds below are expressed in real 9V-rail mV.
-//
-// Why 7.35 V and not lower:
-//   The supply chain is 9V -> TSR-1-2450 (->5V) -> ESP32 LDO (->3.3V) -> ADC Vref.
-//   The TSR-1-2450 loses regulation at ~6.5 V input; below that the 3.3 V rail
-//   and the ADC reference sag, making readings untrustworthy.  Triggering at
-//   7.35 V keeps the worst-case ADC error window (~+/-0.3 V) ABOVE the 6.5 V
-//   regulator cliff, leaving a clean ~2.8 s window to flush the SD card.
-//   (Supercaps 2x1F series = 0.5 F; ~4.5 s from mains loss to 7.35 V at ~150 mA.)
-#define DIVIDER_R_TOP_OHM        180000UL  // R1: 9V rail -> GPIO35
-#define DIVIDER_R_BOTTOM_OHM      47000UL  // R2: GPIO35 -> GND
-
-// POWER_MONITOR_ENABLED
-// ---------------------
-// Set to 1 when the 9V rail + supercapacitor + resistor-divider circuit
-// is fully populated on the PCB.
-// Set to 0 (default) when the circuit is absent or not yet soldered:
-//   GPIO 35 floats / reads 0 V -> railMv = 0 -> always below 7350 mV ->
-//   handlePowerLoss() fires ~600 ms after boot -> WiFi.mode(WIFI_OFF) ->
-//   the softAP disappears before anyone can connect.
-// With this flag = 0, PowerMonitor::update() and isPowerLost() are
-// no-ops; all other firmware is completely unaffected.
-#define POWER_MONITOR_ENABLED      1       // HW circuit populated -- undervoltage sensing active
-
-#define POWER_THRESHOLD_LOW_MV     7350    // trigger shutdown below this (mV, 9V rail)
-#define POWER_THRESHOLD_HIGH_MV    7750    // hysteresis: clear / recover above this (mV)
-#define POWER_STARTUP_GRACE_MS    10000    // ignore readings while supercaps charge
-                                           // (was 3000 -- too short; AP needs ~500 ms to
-                                           //  start, leaving almost no margin before the
-                                           //  first loop() checks began firing)
-#define POWER_CHECK_INTERVAL_MS     200    // how often the rail is sampled
-#define POWER_ADC_SAMPLES            16    // oversampling count (noise ~ 1/sqrt(N))
-#define POWER_ADC_SAMPLE_GAP_US     200    // spacing between oversamples
-#define POWER_MAJORITY_COUNT          3    // consecutive low reads required to trigger
-#define POWER_RECOVER_COUNT          10    // consecutive OK reads during idle -> reboot
-
-// ===== Log-Bedingungen =====
-#define DEFAULT_POWER_THRESHOLD_W    0.0f   // 0 = log everything (no lower limit)
-
-// ===== WLAN =====
-#define WIFI_AP_SSID        "PZEM_Logger"    // Shelly must be pre-paired to this SSID
-#define WIFI_AP_PASSWORD    "logger1234"     // >= 8 chars; change for your deployment
-#define WIFI_AP_HOSTNAME    "braun_PZEM"     // -> http://braun_PZEM.local   (mDNS)
-#define DNS_PORT            53
-
-// ===== SD-Karte =====
-#define LOG_FILE_PATH    "/log.csv"
-// Column "pf" renamed to "pf_apparent" to reflect that it is a derived value
-// (apower / (V x I)), not a direct hardware measurement.  See Req 5 / Req 7c.
-// datetime column added (RTC); time_ms kept for backward compatibility and
-// cross-referencing with uptime-based debug prints.
-// supply_V:    9V-rail voltage measured on GPIO 35 at sample time (V, 2 dp).
-//              Single analogReadMilliVolts() -- not the 16x oversampled safety
-//              read in PowerMonitor. 0.00 when POWER_MONITOR_ENABLED == 0.
-// power_down:  0 = normal operation, 1 = undervoltage latch triggered.
-//              Rows with power_down=1 are the last samples before the graceful
-//              shutdown flush -- the exact moment of mains loss is visible.
-#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent,supply_V,power_down"
-
-// Maximum time allowed for a single flushToSD() call (ms).
-// If _logFile.flush() (the SD sync) takes longer than this the card is
-// declared failed so the next flushIfDue() triggers tryRecoverSD() instead
-// of blocking the HTTP server for another multi-hundred-ms window.
-// 400 ms is deliberately generous: a healthy card at 4 MHz SPI flushes
-// 10 samples (~500 bytes) in < 10 ms. Any card that needs > 400 ms is
-// marginal and should be flagged regardless.
-#define SD_FLUSH_TIMEOUT_MS  400
-
-// ===== RAM-Puffer =====
-// 64 x 16 Byte = 1024 Byte.
-// At 1 s cadence: 64 samples = 64 s of reserve before SD must flush.
-// INTERVAL_SD_FLUSH_MS = 10 s -> buffer only ever holds <= 10 samples normally.
-// 64 entries gives substantial margin if SD is temporarily unavailable.
-#define RAM_BUFFER_SIZE  64
-
-// ===== Webserver =====
-#define HTTP_PORT        80
-#define API_BUFFER_SIZE  320   // sufficient for /api/live incl. shelly_ok + ota_active (~146 chars worst-case)
-
+  // Call every loop() iteration.  Does real work only every
+  // POWER_CHECK_INTERVAL_MS; cheap to call otherwise.
+  // No-op when POWER_MONITOR_ENABLED == 0 (9V circuit not populated).
+  void update() {
+#if POWER_MONITOR_ENABLED == 0
+    return;   // hardware circuit absent -- skip all ADC reads
 #endif
+    uint32_t now = millis();
+
+    // Hold off while the supercaps charge after power-on.
+    if (_graceActive) {
+      if (now - _startupMs < POWER_STARTUP_GRACE_MS) return;
+      _graceActive = false;
+      Serial.println("[Power] Grace-Phase beendet -- Ueberwachung aktiv");
+    }
+
+    if (now - _lastCheckMs < POWER_CHECK_INTERVAL_MS) return;
+    _lastCheckMs = now;
+
+    uint32_t railMv = readRailMilliVolts();
+
+    // Hysteresis + majority voting.
+    if (railMv < POWER_THRESHOLD_LOW_MV) {
+      if (_belowCount < 255) _belowCount++;
+      if (_belowCount >= POWER_MAJORITY_COUNT) {
+        _powerLost = true;     // latched -- cleared only by reboot
+        Serial.printf("[Power] Schwelle unterschritten: %lu mV "
+                      "(%u/%u Messungen)\n",
+                      (unsigned long)railMv,
+                      (unsigned)_belowCount, (unsigned)POWER_MAJORITY_COUNT);
+      }
+    } else if (railMv > POWER_THRESHOLD_HIGH_MV) {
+      _belowCount = 0;         // recovered above the upper band -> reset
+    }
+    // Dead-zone between LOW and HIGH: leave _belowCount unchanged.
+  }
+
+  // Latched: true once a sustained under-voltage has been confirmed.
+  // Always returns false when POWER_MONITOR_ENABLED == 0.
+  bool isPowerLost() const {
+#if POWER_MONITOR_ENABLED == 0
+    return false;
+#else
+    return _powerLost;
+#endif
+  }
+
+
+  // Oversampled, factory-calibrated read of the 9V rail in millivolts.
+  // Public so the shutdown idle loop can watch for mains recovery.
+  uint32_t readRailMilliVolts() {
+    uint32_t accMv = 0;
+    for (uint8_t i = 0; i < POWER_ADC_SAMPLES; i++) {
+      // analogReadMilliVolts() applies the eFuse calibration per sample,
+      // linearising before we average -> better than averaging raw counts.
+      accMv += analogReadMilliVolts(PIN_VSUPPLY);
+      delayMicroseconds(POWER_ADC_SAMPLE_GAP_US);
+    }
+    uint32_t gpioMv = accMv / POWER_ADC_SAMPLES;       // mV at the pin
+
+    // Undo the divider: V_rail = V_gpio * (R_TOP + R_BOTTOM) / R_BOTTOM.
+    // 64-bit intermediate avoids overflow (1800 * 227000 fits in 32-bit,
+    // but the cast keeps it safe if the resistors are ever changed bigger).
+    uint32_t railMv = (uint32_t)(((uint64_t)gpioMv *
+                       (DIVIDER_R_TOP_OHM + DIVIDER_R_BOTTOM_OHM)) /
+                        DIVIDER_R_BOTTOM_OHM);
+    return railMv;
+  }
+
+private:
+  bool     _graceActive;   // true during the post-boot startup window
+  uint32_t _startupMs;     // millis() at begin()
+  uint32_t _lastCheckMs;   // last time the rail was sampled
+  uint8_t  _belowCount;    // consecutive below-threshold checks
+  bool     _powerLost;     // latched trigger flag
+};
+
+#endif  // POWER_MONITOR_H
