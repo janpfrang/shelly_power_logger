@@ -4,3 +4,5 @@
 * folder LOGGER: firmware and shelly scripts can be found here
 * folder .github: automated built and unit test action and manual compilation workflow can be found there
 * folder bring_up_firmware: python tool to flash binary, bring up firmware for ADC
+
+* The device has got a lag time of ~ 5-7 s during start up - in this period, no data is recorded
