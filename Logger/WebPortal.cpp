@@ -954,9 +954,13 @@ bool WebPortal::begin() {
   IPAddress ip = WiFi.softAPIP();
   Serial.printf("[Web] AP '%s' aktiv, IP: %s\n", WIFI_AP_SSID, ip.toString().c_str());
 
-  // Captive portal DNS catch-all
-  _dns.start(DNS_PORT, "*", ip);
-  Serial.println("[Web] DNS-Server gestartet (catch-all)");
+  // Captive portal DNS disabled -- the catch-all "*" redirect triggers
+  // iOS and Windows internet detection, causing them to classify the
+  // network as "no internet" and aggressively disconnect in the background.
+  // Without it, devices connect as a plain WiFi network and stay connected.
+  // Use http://192.168.4.1 directly.
+  // _dns.start(DNS_PORT, "*", ip);
+  Serial.println("[Web] DNS catch-all deaktiviert -- verwende http://192.168.4.1");
 
   // mDNS disabled -- ESPmDNS background UDP processing causes random
   // 100-500 ms loop stalls that block HTTP responses.
@@ -999,21 +1003,15 @@ bool WebPortal::begin() {
 }
 
 void WebPortal::update() {
-  // Measure how long since last update() call -- reveals loop blocking
-  static uint32_t lastUpdateMs = 0;
+  // DNS catch-all disabled -- no DNS processing needed.
+  // Three handleClient() calls per loop() to minimise HTTP response latency.
+  // Loop-block detection: warn if update() wasn't called for > 100 ms.
+  static uint32_t lastMs = 0;
   uint32_t now = millis();
-  uint32_t loopGap = now - lastUpdateMs;
-  if (loopGap > 50) {  // only print if gap > 50 ms (i.e. something blocked)
-    Serial.printf("[Web] loop blocked for %lu ms\n", loopGap);
+  if (lastMs > 0 && (now - lastMs) > 100) {
+    Serial.printf("[Web] gap %lu ms\n", now - lastMs);
   }
-  lastUpdateMs = now;
-
-  // Process DNS only every 50 ms
-  static uint32_t lastDnsMs = 0;
-  if (now - lastDnsMs >= 50) {
-    _dns.processNextRequest();
-    lastDnsMs = now;
-  }
+  lastMs = now;
 
   _server.handleClient();
   _server.handleClient();
@@ -1025,7 +1023,9 @@ void WebPortal::update() {
 // -----------------------------------------------------------------------------
 
 void WebPortal::handleRoot() {
+  uint32_t t0 = millis();
   _server.send_P(200, "text/html", PAGE_INDEX);
+  Serial.printf("[Web] GET /  %lu ms\n", millis() - t0);
 }
 
 void WebPortal::handleCaptivePortal() {
@@ -1035,13 +1035,16 @@ void WebPortal::handleCaptivePortal() {
 
 // -- NEW: receives push from shelly_push.js --------------------------------
 void WebPortal::handleShellyPush() {
-  String body = _server.arg("plain");   // raw POST body
+  uint32_t t0 = millis();
+  String body = _server.arg("plain");
   if (body.length() == 0) {
     _server.send(400, "application/json", "{\"error\":\"empty body\"}");
     return;
   }
   if (_shelly.ingest(body)) {
     _server.send(200, "application/json", "{\"ok\":true}");
+    uint32_t dt = millis() - t0;
+    if (dt > 50) Serial.printf("[Web] POST /shelly_push %lu ms\n", dt);
   } else {
     _server.send(400, "application/json", "{\"error\":\"parse failed\"}");
   }
@@ -1049,6 +1052,7 @@ void WebPortal::handleShellyPush() {
 
 // -- /api/live -- includes shelly_ok (v6) and ota_active (v7) -------------
 void WebPortal::handleApiLive() {
+  uint32_t t0 = millis();
   char buf[API_BUFFER_SIZE];
   float p  = _logger.getLastPower();
   float v  = _logger.getLastVoltage();
@@ -1079,9 +1083,12 @@ void WebPortal::handleApiLive() {
     _logger.isOtaInProgress() ? "true" : "false");
 
   _server.send(200, "application/json", buf);
+  uint32_t dt = millis() - t0;
+  if (dt > 50) Serial.printf("[Web] GET /api/live %lu ms\n", dt);
 }
 
 void WebPortal::handleDownload() {
+  uint32_t t0 = millis();
   _logger.flushToSD();
   File f = _logger.openLogFileForRead();
   if (!f) {
@@ -1093,6 +1100,7 @@ void WebPortal::handleDownload() {
   _server.streamFile(f, "text/csv");
   f.close();
   _logger.reopenAfterRead();
+  Serial.printf("[Web] GET /download %lu ms\n", millis() - t0);
 }
 
 void WebPortal::handleReset() {
