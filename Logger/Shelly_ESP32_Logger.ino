@@ -52,9 +52,9 @@
  * Loop timing (approximate, single-core)
  * ---------------------------------------
  *   powerMonitor.update() — checks every ~0–5 ms; samples every 200 ms (~3 ms)
+ *   webPortal.update()    — handles one HTTP request per call (~1–50 ms); runs FIRST
  *   pollIfDue()           — checks every ~0–5 ms; fires every 1000 ms (default)
  *   flushIfDue()          — checks every ~0–5 ms; fires every 10 000 ms
- *   webPortal.update()    — handles one HTTP request per call (~1–50 ms)
  *   statusLed.update()    — non-blocking toggle check (~0 ms)
  *
  * Required Arduino libraries (Library Manager)
@@ -155,15 +155,22 @@ void loop() {
     handlePowerLoss();
   }
 
-  // 1. Check if new Shelly data is due to be sampled into the ring buffer
+  // 1. Service HTTP requests FIRST so that any arriving Shelly push is
+  //    ingested into the ShellyClient cache before pollIfDue() reads it.
+  //    Previous order (poll → flush → update) meant every sample was read
+  //    from the *previous* tick's cached value — a structural one-loop lag.
+  //    New order: update (ingest) → poll (read fresh cache) → flush.
+  //    No other dependency is affected: flushIfDue() does not care about
+  //    network state, and the LED update always reads the post-poll state.
+  webPortal.update();
+
+  // 2. Sample the freshly-ingested Shelly data into the ring buffer.
+  //    pollIfDue() now always sees the measurement that arrived this loop
+  //    iteration rather than the one from the previous iteration.
   logger.pollIfDue();
 
-  // 2. Flush ring buffer to SD on schedule
+  // 3. Flush ring buffer to SD on schedule.
   logger.flushIfDue();
-
-  // 3. Service HTTP requests (this is where handleShellyPush() fires,
-  //    updating shelly's cache, which pollIfDue() will read next tick)
-  webPortal.update();
 
   // 4. Update LED — reflects logger.ok() = shellyOk() && sdOk()
   //    idempotent: no flicker if state hasn't changed
