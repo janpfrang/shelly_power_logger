@@ -82,9 +82,9 @@
 #include "Config.h"
 #include "StatusLed.h"
 #include "ShellyClient.h"
+#include "PowerMonitor.h"   // must precede Logger.h -- Logger uses POWER_MONITOR_ENABLED
 #include "Logger.h"
 #include "WebPortal.h"
-#include "PowerMonitor.h"
 
 // ── Object instantiation order matters:
 //    ShellyClient has no dependencies.
