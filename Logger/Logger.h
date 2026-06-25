@@ -102,6 +102,7 @@ public:
     _sdSPI.begin(PIN_SD_CLK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
     _sdOk = initSDCard();
     Serial.printf("[Logger] SD=%s\n", _sdOk ? "OK" : "FEHLER");
+    if (_sdOk) _openLogFile();   // FAT traversal happens once here only
     return _sdOk;
   }
 
@@ -202,16 +203,14 @@ public:
   bool flushToSD() {
     if (!_sdOk || _bufferCount == 0) return _sdOk;
 
-    File f = SD.open(LOG_FILE_PATH, FILE_APPEND);
-    if (!f) {
-      Serial.println("[Logger] SD-Open fehlgeschlagen, markiere SD als defekt");
+    if (!_logFile) _openLogFile();
+    if (!_logFile) {
+      Serial.println("[Logger] Log-Datei nicht verfuegbar");
       _sdOk = false;
       return false;
     }
 
     for (size_t i = 0; i < _bufferCount; i++) {
-      // Format wall-clock timestamp as ISO-8601: YYYY-MM-DDTHH:MM:SS
-      // unix_ts == 0 means the RTC was absent or not set.
       char dtbuf[20];
       if (_buffer[i].unix_ts > 0) {
         DateTime dt(_buffer[i].unix_ts);
@@ -221,15 +220,14 @@ public:
       } else {
         snprintf(dtbuf, sizeof(dtbuf), "RTC_NOT_SET");
       }
-      f.printf("%s,%lu,%.1f,%.1f,%.2f\n",
+      _logFile.printf("%s,%lu,%.1f,%.1f,%.2f\n",
                dtbuf,
                (unsigned long)_buffer[i].millis_ts,
                _buffer[i].voltage_V,
                _buffer[i].power_W,
                _buffer[i].pf);
     }
-    f.flush();
-    f.close();
+    _logFile.flush();   // commit to SD -- no close, no FAT traversal
 
     Serial.printf("[Logger] %u Samples auf SD geschrieben\n",
                   (unsigned)_bufferCount);
@@ -237,21 +235,24 @@ public:
     return true;
   }
 
-  // -- Reset log file (POST /reset handler) -- unchanged from v4 -------------
+  // -- Reset log file (POST /reset handler) ----------------------------------
   bool resetSDFile() {
     if (!_sdOk) return false;
     _bufferCount = 0;
+    if (_logFile) _logFile.close();
     if (SD.exists(LOG_FILE_PATH)) {
       if (!SD.remove(LOG_FILE_PATH)) {
         Serial.println("[Logger] SD.remove fehlgeschlagen");
+        _openLogFile();
         return false;
       }
     }
     File f = SD.open(LOG_FILE_PATH, FILE_WRITE);
-    if (!f) return false;
+    if (!f) { _openLogFile(); return false; }
     f.println(LOG_FILE_HEADER);
     f.close();
     Serial.println("[Logger] Log-Datei zurueckgesetzt");
+    _openLogFile();
     return true;
   }
 
@@ -267,13 +268,20 @@ public:
 
   File openLogFileForRead() {
     if (!_sdOk) return File();
-    return SD.open(LOG_FILE_PATH, FILE_READ);
+    if (_logFile) { _logFile.flush(); _logFile.close(); }
+    File f = SD.open(LOG_FILE_PATH, FILE_READ);
+    return f;
+    // Note: _openLogFile() NOT called here -- WebPortal calls it via
+    // reopenAfterRead() once the stream is closed.
   }
+
+  void reopenAfterRead() { _openLogFile(); }
 
 private:
   ShellyClient& _shelly;      // injected reference -- not owned
   RTC_DS3231*   _rtc;         // optional injected pointer -- not owned (nullptr = no RTC)
   SPIClass      _sdSPI;
+  File          _logFile;     // persistent write handle -- opened once, never closed between flushes
   Sample        _buffer[RAM_BUFFER_SIZE];
   size_t        _bufferCount;
   uint32_t      _droppedSamples;
@@ -310,17 +318,28 @@ private:
     }
   }
 
+  void _openLogFile() {
+    if (_logFile) _logFile.close();
+    _logFile = SD.open(LOG_FILE_PATH, FILE_APPEND);
+    if (_logFile) {
+      Serial.println("[Logger] Log-Datei geoeffnet");
+    } else {
+      Serial.println("[Logger] Log-Datei open() fehlgeschlagen");
+      _sdOk = false;
+    }
+  }
+
   bool initSDCard() {
     return SD.begin(PIN_SD_CS, _sdSPI, 4000000);
   }
 
-  // -- SD auto-recovery every 30 s (unchanged from v4) ----------------------
+  // -- SD auto-recovery every 30 s ------------------------------------------
   void tryRecoverSD() {
     uint32_t now = millis();
     if (now - _lastSdRetryMs < 30000) return;
     _lastSdRetryMs = now;
-
     Serial.println("[Logger] Versuche SD-Karte neu zu initialisieren...");
+    if (_logFile) _logFile.close();
     SD.end();
     delay(50);
     _sdOk = initSDCard();
@@ -329,6 +348,7 @@ private:
         File f = SD.open(LOG_FILE_PATH, FILE_WRITE);
         if (f) { f.println(LOG_FILE_HEADER); f.close(); }
       }
+      _openLogFile();
       Serial.println("[Logger] SD wieder verfuegbar");
     }
   }
