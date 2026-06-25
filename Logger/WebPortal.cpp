@@ -1,20 +1,32 @@
 /*
- * WebPortal.cpp v8  (Shelly + ESP32 + OTA + batch push)
- * ======================================================
+ * WebPortal.cpp v7  (Shelly + ESP32 + OTA)
+ * ==========================================
  *
- * Changes vs. v7:
+ * Changes vs. v6 (Shelly + ESP32):
  *
- *  1. handleShellyPush() — detects {"batch":[…]} payloads from
- *     shelly_push.js v2 and routes them to _shelly.ingestBatch().
- *     Single-sample payloads {"ts":…,"v":…,…} continue to use
- *     _shelly.ingest() as before — no behaviour change for normal
- *     steady-state operation.
+ *  1. PAGE_OTA  -- new PROGMEM page: drag-and-drop .bin upload form with
+ *     live progress bar and automatic redirect after successful flash.
  *
- *     Detection: if the raw body contains the key "batch" it is
- *     treated as a batch payload.  This is a fast string check
- *     (strstr) that avoids a full JSON parse just for routing.
+ *  2. GET /update   -- serves PAGE_OTA
+ *     POST /update  -- streams firmware binary to Update.h flash writer.
+ *     Both routes registered in begin().
  *
- *  Everything else -- unchanged from v7.
+ *  3. handleOtaForm()   -- trivial send_P of PAGE_OTA
+ *     handleOtaUpload() -- sends final HTTP 200/500 response after upload
+ *     handleOtaChunk()  -- per-chunk upload callback; calls Update.write()
+ *
+ *  4. GET /api/live  -- adds "ota_active" boolean so the home page can
+ *     display an "Update in progress" banner during flash.
+ *     API_BUFFER_SIZE 320 in Config.h remains sufficient
+ *     (worst-case JSON is ~146 chars -- no Config.h change needed).
+ *
+ *  5. Home page (PAGE_INDEX) -- OTA button added to the button grid,
+ *     "ota_active" banner shown/hidden by the existing refresh() loop.
+ *
+ *  6. README page (PAGE_README) -- OTA section added to the page table.
+ *
+ *  Everything else -- all other pages, routes, handlers, Wi-Fi setup,
+ *  captive portal, Shelly push, settings, SD download/reset -- UNCHANGED.
  */
 
 #include "WebPortal.h"
@@ -70,8 +82,7 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
   <hr style="border: 0; border-top: 1px solid #eee; margin: 1em 0;">
   <div class="status">
     Shelly: <span id="shelly-status" class="ok">?</span>
-    SD:     <span id="sd-status"     class="ok">?</span>
-    Versorg: <span id="supply-status" class="ok">?</span><br><br>
+    SD:     <span id="sd-status"     class="ok">?</span><br><br>
     Puffer: <span id="buf">0</span>
     | Verworfen: <span id="drop">0</span>
     | Uptime: <span id="uptime">0</span> s
@@ -116,15 +127,6 @@ async function refresh() {
     const sd = document.getElementById('sd-status');
     sd.textContent = d.sd_ok ? 'OK' : 'FEHLER';
     sd.className   = d.sd_ok   ? 'ok' : 'err';
-    const sv = document.getElementById('supply-status');
-    if (d.supply_mv === 0) {
-      sv.textContent = 'N/A';
-      sv.className   = 'ok';
-    } else {
-      const supplyV = (d.supply_mv / 1000.0).toFixed(1);
-      sv.textContent = supplyV + ' V';
-      sv.className   = d.supply_ok ? 'ok' : 'err';
-    }
     document.getElementById('ota-banner').style.display =
       d.ota_active ? 'block' : 'none';
   } catch (e) {
@@ -930,38 +932,36 @@ function hideMsg() {
 // Implementation
 // -----------------------------------------------------------------------------
 
-WebPortal::WebPortal(Logger& logger, ShellyClient& shelly, RTC_DS3231* rtc, PowerMonitor* pm)
-  : _logger(logger), _shelly(shelly), _rtc(rtc), _pm(pm), _server(HTTP_PORT) {}
+WebPortal::WebPortal(Logger& logger, ShellyClient& shelly)
+  : _logger(logger), _shelly(shelly), _server(HTTP_PORT) {}
 
 bool WebPortal::begin() {
-  Serial.println("[Web] Starte WLAN AP...");
+  Serial.println("[Web] Starte WLAN AP+STA...");
 
+  // AP-only mode -- radio stays locked on AP channel.
+  // WIFI_AP_STA causes background channel scanning when STA is unconnected,
+  // making the softAP randomly deaf for ~400 ms per scan cycle.
   WiFi.mode(WIFI_AP);
 
-  // Disable radio power saving -- power save mode causes the radio to sleep
-  // between beacon intervals, making it deaf to incoming packets.
+  // Disable radio power saving -- default power-save mode sleeps between
+  // beacon intervals (~100 ms), dropping incoming packets during sleep.
   WiFi.setSleep(false);
 
-  // Single softAP call with channel 6 locked.
-  // Channel 6 is a standard non-overlapping channel (1/6/11).
-  // Fixed channel prevents clients needing to re-scan after reboot.
-  if (!WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, 6)) {
+  if (!WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD)) {
     Serial.println("[Web] softAP() fehlgeschlagen!");
     return false;
   }
-
   IPAddress ip = WiFi.softAPIP();
-  Serial.printf("[Web] AP '%s' aktiv auf Kanal 6, IP: %s\n", WIFI_AP_SSID, ip.toString().c_str());
+  Serial.printf("[Web] AP '%s' aktiv, IP: %s\n", WIFI_AP_SSID, ip.toString().c_str());
 
-  // DNS catch-all for captive portal detection only.
-  // Resolves every hostname to the ESP32 IP so browsers redirect to our page.
+  // Captive portal DNS catch-all
   _dns.start(DNS_PORT, "*", ip);
   Serial.println("[Web] DNS-Server gestartet (catch-all)");
 
-  // mDNS intentionally disabled -- ESPmDNS background processing causes
-  // random 100-500 ms loop stalls that block HTTP responses.
-  // Use http://192.168.4.1 directly or the captive portal redirect instead.
-  // MDNS.begin(WIFI_AP_HOSTNAME);  // disabled
+  // mDNS disabled -- ESPmDNS background UDP processing causes random
+  // 100-500 ms loop stalls that block HTTP responses.
+  // Use http://192.168.4.1 directly instead.
+  // if (MDNS.begin(WIFI_AP_HOSTNAME)) { ... }  // disabled
 
   // -- Captive portal probes ----------------------------------------------
   _server.on("/generate_204",              HTTP_GET, [this](){ handleCaptivePortal(); });
@@ -991,7 +991,6 @@ bool WebPortal::begin() {
   _server.on("/readme",              HTTP_GET,  [this](){ handleReadme(); });
   _server.on("/histogram",            HTTP_GET,  [this](){ handleHistogram(); });
   _server.on("/liveplot",            HTTP_GET,  [this](){ handleLivePlot(); });
-  _server.on("/api/set_rtc",         HTTP_POST, [this](){ handleApiSetRtc(); });  // v8
   _server.onNotFound(                          [this](){ handleNotFound(); });
 
   _server.begin();
@@ -1000,14 +999,7 @@ bool WebPortal::begin() {
 }
 
 void WebPortal::update() {
-  // Rate-limit DNS to every 50 ms -- captive portal probes from iOS/Windows
-  // arrive in bursts and processNextRequest() handles only one per call,
-  // so without rate-limiting it can starve handleClient() on busy ticks.
-  uint32_t now = millis();
-  if (now - _lastDnsMs >= 50) {
-    _dns.processNextRequest();
-    _lastDnsMs = now;
-  }
+  _dns.processNextRequest();
   _server.handleClient();
 }
 
@@ -1026,27 +1018,11 @@ void WebPortal::handleCaptivePortal() {
 
 // -- NEW: receives push from shelly_push.js --------------------------------
 void WebPortal::handleShellyPush() {
-  String body = _server.arg("plain");
+  String body = _server.arg("plain");   // raw POST body
   if (body.length() == 0) {
     _server.send(400, "application/json", "{\"error\":\"empty body\"}");
     return;
   }
-
-  // Fast check: does the body look like a batch payload?
-  // strstr is cheaper than a full JSON parse for this routing decision.
-  if (body.indexOf("\"batch\"") >= 0) {
-    int count = _shelly.ingestBatch(body);
-    if (count >= 0) {
-      char resp[48];
-      snprintf(resp, sizeof(resp), "{\"ok\":true,\"batch\":%d}", count);
-      _server.send(200, "application/json", resp);
-    } else {
-      _server.send(400, "application/json", "{\"error\":\"batch parse failed\"}");
-    }
-    return;
-  }
-
-  // Normal single-sample path (unchanged)
   if (_shelly.ingest(body)) {
     _server.send(200, "application/json", "{\"ok\":true}");
   } else {
@@ -1054,7 +1030,7 @@ void WebPortal::handleShellyPush() {
   }
 }
 
-// -- /api/live -- includes shelly_ok (v6), ota_active (v7), supply_mv (v9) --
+// -- /api/live -- includes shelly_ok (v6) and ota_active (v7) -------------
 void WebPortal::handleApiLive() {
   char buf[API_BUFFER_SIZE];
   float p  = _logger.getLastPower();
@@ -1062,7 +1038,7 @@ void WebPortal::handleApiLive() {
   float pf = _logger.getLastPf();
 
   // Build only the sensor part conditionally. The status fields
-  // (buffer/dropped/uptime/shelly_ok/sd_ok/ota_active/supply_mv) are identical in
+  // (buffer/dropped/uptime/shelly_ok/sd_ok/ota_active) are identical in
   // both cases, so they are formatted exactly once below -- adding a new
   // status field means editing one place, not two.
   char sensor[72];
@@ -1074,24 +1050,16 @@ void WebPortal::handleApiLive() {
              "\"power\":%.1f,\"voltage\":%.1f,\"pf\":%.2f", p, v, pf);
   }
 
-  // Supply voltage: read from PowerMonitor cache (0 when monitor disabled).
-  uint32_t supplyMv   = _pm ? _pm->getLastRailMilliVolts() : 0;
-  bool     supplyOk   = (supplyMv == 0) ||
-                        (supplyMv >= POWER_THRESHOLD_LOW_MV);  // green when disabled too
-
   snprintf(buf, sizeof(buf),
     "{%s,\"buffer\":%u,\"dropped\":%lu,\"uptime\":%lu,"
-    "\"shelly_ok\":%s,\"sd_ok\":%s,\"ota_active\":%s,"
-    "\"supply_mv\":%lu,\"supply_ok\":%s}",
+    "\"shelly_ok\":%s,\"sd_ok\":%s,\"ota_active\":%s}",
     sensor,
     (unsigned)_logger.getBufferCount(),
     (unsigned long)_logger.getDroppedSamples(),
     (unsigned long)(millis() / 1000),
-    _logger.shellyOk()        ? "true" : "false",
-    _logger.sdOk()            ? "true" : "false",
-    _logger.isOtaInProgress() ? "true" : "false",
-    (unsigned long)supplyMv,
-    supplyOk                  ? "true" : "false");
+    _logger.shellyOk()      ? "true" : "false",
+    _logger.sdOk()          ? "true" : "false",
+    _logger.isOtaInProgress() ? "true" : "false");
 
   _server.send(200, "application/json", buf);
 }
@@ -1271,60 +1239,6 @@ void WebPortal::handleOtaChunk() {
     _logger.setOtaInProgress(false);
     Serial.println("[OTA] Upload abgebrochen -- Logging wiederhergestellt");
   }
-}
-
-// -- POST /api/set_rtc -- set the DS3231 RTC time (NEW v8) ------------------
-//
-// Body (application/json):
-//   { "year":YYYY, "month":M, "day":D, "hour":H, "minute":M, "second":S }
-// Response 200: { "ok":true, "time":"YYYY-MM-DDTHH:MM:SS" }
-// Response 400: { "error":"..." }   -- missing or out-of-range fields
-// Response 503: { "error":"RTC not available" }  -- _rtc == nullptr
-void WebPortal::handleApiSetRtc() {
-  if (!_rtc) {
-    _server.send(503, "application/json", "{\"error\":\"RTC not available\"}");
-    return;
-  }
-
-  String body = _server.arg("plain");
-  if (body.length() == 0) {
-    _server.send(400, "application/json", "{\"error\":\"empty body\"}");
-    return;
-  }
-
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, body);
-  if (err) {
-    _server.send(400, "application/json", "{\"error\":\"JSON parse failed\"}");
-    return;
-  }
-
-  int y  = doc["year"]   | 0;
-  int mo = doc["month"]  | 0;
-  int d  = doc["day"]    | 0;
-  int h  = doc["hour"]   | 0;
-  int mi = doc["minute"] | 0;
-  int s  = doc["second"] | 0;
-
-  if (y < 2020 || y > 2099 ||
-      mo < 1   || mo > 12  ||
-      d  < 1   || d  > 31  ||
-      h  < 0   || h  > 23  ||
-      mi < 0   || mi > 59  ||
-      s  < 0   || s  > 59) {
-    _server.send(400, "application/json", "{\"error\":\"invalid or missing fields\"}");
-    return;
-  }
-
-  _rtc->adjust(DateTime(y, mo, d, h, mi, s));
-  Serial.printf("[RTC] Zeit gesetzt: %04d-%02d-%02d %02d:%02d:%02d\n",
-                y, mo, d, h, mi, s);
-
-  char resp[72];
-  snprintf(resp, sizeof(resp),
-           "{\"ok\":true,\"time\":\"%04d-%02d-%02dT%02d:%02d:%02d\"}",
-           y, mo, d, h, mi, s);
-  _server.send(200, "application/json", resp);
 }
 
 void WebPortal::handleNotFound() {
