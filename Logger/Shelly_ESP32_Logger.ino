@@ -82,7 +82,7 @@
 #include "Config.h"
 #include "StatusLed.h"
 #include "ShellyClient.h"
-#include "PowerMonitor.h"   // must precede Logger.h -- Logger uses POWER_MONITOR_ENABLED
+#include "PowerMonitor.h"   // also included by Logger.h; explicit here for clarity
 #include "Logger.h"
 #include "WebPortal.h"
 
