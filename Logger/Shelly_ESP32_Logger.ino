@@ -161,6 +161,12 @@ void loop() {
   //    handlePowerLoss() never returns.
   powerMonitor.update();
   if (powerMonitor.isPowerLost()) {
+    // Propagate flag and push one final sample BEFORE the terminal flush so
+    // the CSV gets at least one row with power_down=1 marking the shutdown.
+    // Previously setPowerLost() and pollIfDue() were AFTER this block and
+    // therefore never reached (handlePowerLoss() never returns).
+    logger.setPowerLost(true);
+    logger.pollIfDue();
     handlePowerLoss();
   }
   // Propagate the power-loss latch flag to Logger so pollIfDue() can stamp
