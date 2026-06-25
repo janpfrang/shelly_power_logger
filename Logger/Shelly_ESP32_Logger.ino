@@ -1,8 +1,17 @@
 /*
- * Shelly_ESP32_Logger.ino  v3
+ * Shelly_ESP32_Logger.ino  v4
  * ============================
  *
  * Main sketch for the Shelly Plug S MTR Gen3 + ESP32 + SD power logger.
+ *
+ * Changes vs. v3
+ * --------------
+ *   CHANGED  Logger logger -- now takes &powerMonitor.isPowerLost() as third
+ *            argument (const bool* powerLostPtr) so Logger::pollIfDue() can
+ *            stamp every Sample with supply_V and power_down without depending
+ *            on PowerMonitor.h directly.
+ *   NOTE     Logger must be declared AFTER PowerMonitor so the latch flag
+ *            address is valid at construction time.
  *
  * Changes vs. v1
  * --------------
@@ -79,15 +88,17 @@
 
 // ── Object instantiation order matters:
 //    ShellyClient has no dependencies.
-//    Logger depends on ShellyClient.
+//    PowerMonitor has no dependencies (declared before Logger so its latch
+//      flag address is valid when Logger is constructed).
+//    Logger depends on ShellyClient + optionally RTC + optionally PowerMonitor latch.
 //    WebPortal depends on both Logger and ShellyClient.
-//    PowerMonitor has no dependencies.
 ShellyClient shelly;
 RTC_DS3231   rtc;
-Logger       logger(shelly, &rtc);   // &rtc: optional pointer; nullptr = RTC absent
+PowerMonitor powerMonitor;                          // must precede Logger
+Logger       logger(shelly, &rtc,
+                   powerMonitor.getPowerLostPtr()); // supply_V + power_down columns
 WebPortal    webPortal(logger, shelly);
 StatusLed    statusLed;
-PowerMonitor powerMonitor;
 
 // Forward declaration (Arduino auto-prototypes, but explicit is clearer).
 void handlePowerLoss();
