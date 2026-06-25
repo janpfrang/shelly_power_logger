@@ -1,14 +1,6 @@
 /*
- * PowerMonitor.h  -  9V-rail loss detection  (v3)
+ * PowerMonitor.h  -  9V-rail loss detection  (v2)
  * =================================================
- *
- * Changes vs. v2
- * --------------
- *   ADDED  _lastRailMv cached member -- updated every POWER_CHECK_INTERVAL_MS
- *          inside update().  Allows WebPortal and Logger to read the latest
- *          rail voltage without triggering an extra oversampled ADC burst.
- *   ADDED  getLastRailMilliVolts() -- returns _lastRailMv (0 when
- *          POWER_MONITOR_ENABLED == 0 or during startup grace).
  *
  * Changes vs. v1
  * --------------
@@ -124,8 +116,7 @@ public:
       _startupMs(0),
       _lastCheckMs(0),
       _belowCount(0),
-      _powerLost(false),
-      _lastRailMv(0)
+      _powerLost(false)
   {}
 
   // Configure the ADC for the GPIO 35 divider tap.
@@ -162,8 +153,7 @@ public:
     if (now - _lastCheckMs < POWER_CHECK_INTERVAL_MS) return;
     _lastCheckMs = now;
 
-    uint32_t railMv = readRailMilliVolts();           // raw
-    _lastRailMv = getCorrectedRailMilliVolts(railMv); // corrected, for display/log
+    uint32_t railMv = readRailMilliVolts();
 
     // Hysteresis + majority voting.
     if (railMv < POWER_THRESHOLD_LOW_MV) {
@@ -191,21 +181,8 @@ public:
 #endif
   }
 
-  // Returns the most recently cached rail voltage in millivolts.
-  // Updated every POWER_CHECK_INTERVAL_MS by update().
-  // Returns 0 when POWER_MONITOR_ENABLED == 0 or during startup grace.
-  uint32_t getLastRailMilliVolts() const {
-#if POWER_MONITOR_ENABLED == 0
-    return 0;
-#else
-    return _lastRailMv;
-#endif
-  }
-
   // Oversampled, factory-calibrated read of the 9V rail in millivolts.
   // Public so the shutdown idle loop can watch for mains recovery.
-  // Returns RAW (uncorrected) millivolts -- thresholds are also raw.
-  // Call getLastRailMilliVolts() for the corrected display/log value.
   uint32_t readRailMilliVolts() {
     uint32_t accMv = 0;
     for (uint8_t i = 0; i < POWER_ADC_SAMPLES; i++) {
@@ -217,17 +194,12 @@ public:
     uint32_t gpioMv = accMv / POWER_ADC_SAMPLES;       // mV at the pin
 
     // Undo the divider: V_rail = V_gpio * (R_TOP + R_BOTTOM) / R_BOTTOM.
-    // 64-bit intermediate avoids overflow.
+    // 64-bit intermediate avoids overflow (1800 * 227000 fits in 32-bit,
+    // but the cast keeps it safe if the resistors are ever changed bigger).
     uint32_t railMv = (uint32_t)(((uint64_t)gpioMv *
                        (DIVIDER_R_TOP_OHM + DIVIDER_R_BOTTOM_OHM)) /
                         DIVIDER_R_BOTTOM_OHM);
-    return railMv;   // RAW -- thresholds compare against this directly
-  }
-
-  // Returns the corrected (display-accurate) rail voltage in millivolts.
-  // Applies POWER_ADC_CORRECTION to compensate for ADC + source-impedance offset.
-  uint32_t getCorrectedRailMilliVolts(uint32_t rawMv) const {
-    return (uint32_t)(rawMv * POWER_ADC_CORRECTION);
+    return railMv;
   }
 
 private:
@@ -236,7 +208,6 @@ private:
   uint32_t _lastCheckMs;   // last time the rail was sampled
   uint8_t  _belowCount;    // consecutive below-threshold checks
   bool     _powerLost;     // latched trigger flag
-  uint32_t _lastRailMv;    // cached result of last readRailMilliVolts() call
 };
 
 #endif  // POWER_MONITOR_H
