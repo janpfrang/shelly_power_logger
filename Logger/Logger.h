@@ -200,6 +200,16 @@ public:
   }
 
   // -- Public flush (called by /download handler before streaming) ----------
+  //
+  // Timing guard (fix for issue #6):
+  //   _logFile.flush() syncs data to SD media via SPI.  On a healthy card at
+  //   4 MHz SPI this takes < 10 ms.  On a marginal card it can stall for
+  //   hundreds of ms, blocking the HTTP server and causing Shelly push timeouts.
+  //   We time the entire flush call.  If it exceeds SD_FLUSH_TIMEOUT_MS we
+  //   set _sdOk = false so the next flushIfDue() calls tryRecoverSD() rather
+  //   than blocking again.  The data written in this call is NOT discarded —
+  //   the rows are already in the file handle's write buffer before flush() is
+  //   called; the sync may have partially succeeded even if it was slow.
   bool flushToSD() {
     if (!_sdOk || _bufferCount == 0) return _sdOk;
 
@@ -209,6 +219,8 @@ public:
       _sdOk = false;
       return false;
     }
+
+    uint32_t t0 = millis();
 
     for (size_t i = 0; i < _bufferCount; i++) {
       char dtbuf[20];
@@ -227,7 +239,25 @@ public:
                _buffer[i].power_W,
                _buffer[i].pf);
     }
-    _logFile.flush();   // commit to SD -- no close, no FAT traversal
+
+    _logFile.flush();   // commit to SD -- this is the blocking call
+
+    uint32_t dt = millis() - t0;
+    if (dt > SD_FLUSH_TIMEOUT_MS) {
+      // Card is too slow — flag it so tryRecoverSD() runs next cycle instead
+      // of blocking here again.  Data already written above is not lost.
+      Serial.printf("[Logger] WARNUNG: SD-Flush %lu ms (Limit %d ms) -- SD als fehlerhaft markiert\n",
+                    (unsigned long)dt, SD_FLUSH_TIMEOUT_MS);
+      _sdOk = false;
+      _bufferCount = 0;
+      return false;
+    }
+    if (dt > 50) {
+      // Slower than expected but within limit — log it so marginal cards
+      // are visible in the serial output without being fatal.
+      Serial.printf("[Logger] SD-Flush %lu ms (%u Samples)\n",
+                    (unsigned long)dt, (unsigned)_bufferCount);
+    }
 
     Serial.printf("[Logger] %u Samples auf SD geschrieben\n",
                   (unsigned)_bufferCount);
