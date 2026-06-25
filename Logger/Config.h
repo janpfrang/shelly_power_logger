@@ -59,8 +59,22 @@
 
 // Shelly push watchdog: if no push is received for this many consecutive
 // expected intervals, the Shelly is declared unreachable (-> LED_ERROR).
-// 3 x 1000 ms = 3 s of silence before error is flagged during normal operation.
-#define SHELLY_ERROR_THRESHOLD   3
+// 5 x 1000 ms = 5 s silence window.
+//
+// Why 5 and not 3:
+//   a) The Shelly mJS timer is NOT compensated — each doPush() fires 1000 ms
+//      after the *previous callback completes*, not after it was scheduled.
+//      doPush() itself takes a few ms, so the real cadence is ~1005-1010 ms.
+//      After 3 pushes the accumulated drift can exceed the 3 s window, tripping
+//      the watchdog even with a perfect WiFi link.
+//   b) shelly_push.js uses PUSH_INTERVAL_MS = 1200 ms (200 ms margin over the
+//      HTTP timeout) so the steady-state push cadence is ~1200 ms. At threshold
+//      3 the window would be only 3000 ms — leaving room for only 2.5 pushes.
+//      At threshold 5 the window is 5000 ms — 4 full pushes at 1200 ms cadence
+//      before the watchdog fires.  That is the right safety margin.
+//   c) flushToSD() can block loop() for up to SD_FLUSH_TIMEOUT_MS (400 ms).
+//      With threshold 3 a single slow flush consumed 40 % of the watchdog budget.
+#define SHELLY_ERROR_THRESHOLD   5
 
 // Startup grace for the Shelly watchdog (ms).
 // When the ESP32 boots after the Shelly is already running, the softAP takes
@@ -146,6 +160,15 @@
 // datetime column added (RTC); time_ms kept for backward compatibility and
 // cross-referencing with uptime-based debug prints.
 #define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent"
+
+// Maximum time allowed for a single flushToSD() call (ms).
+// If _logFile.flush() (the SD sync) takes longer than this the card is
+// declared failed so the next flushIfDue() triggers tryRecoverSD() instead
+// of blocking the HTTP server for another multi-hundred-ms window.
+// 400 ms is deliberately generous: a healthy card at 4 MHz SPI flushes
+// 10 samples (~500 bytes) in < 10 ms. Any card that needs > 400 ms is
+// marginal and should be flagged regardless.
+#define SD_FLUSH_TIMEOUT_MS  400
 
 // ===== RAM-Puffer =====
 // 64 x 16 Byte = 1024 Byte.
