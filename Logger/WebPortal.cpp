@@ -999,17 +999,22 @@ bool WebPortal::begin() {
 }
 
 void WebPortal::update() {
-  // Process DNS only every 50 ms -- iOS/Windows send captive portal probes
-  // in bursts; without rate-limiting they starve handleClient().
-  static uint32_t lastDnsMs = 0;
+  // Measure how long since last update() call -- reveals loop blocking
+  static uint32_t lastUpdateMs = 0;
   uint32_t now = millis();
+  uint32_t loopGap = now - lastUpdateMs;
+  if (loopGap > 50) {  // only print if gap > 50 ms (i.e. something blocked)
+    Serial.printf("[Web] loop blocked for %lu ms\n", loopGap);
+  }
+  lastUpdateMs = now;
+
+  // Process DNS only every 50 ms
+  static uint32_t lastDnsMs = 0;
   if (now - lastDnsMs >= 50) {
     _dns.processNextRequest();
     lastDnsMs = now;
   }
 
-  // Call handleClient() 3x per loop() iteration so a queued HTTP request
-  // (e.g. page load after tap) doesn't wait a full loop cycle to be served.
   _server.handleClient();
   _server.handleClient();
   _server.handleClient();
