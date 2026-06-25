@@ -1089,18 +1089,43 @@ void WebPortal::handleApiLive() {
 
 void WebPortal::handleDownload() {
   uint32_t t0 = millis();
+
+  // Flush any buffered samples so the download includes the latest data.
   _logger.flushToSD();
+
   File f = _logger.openLogFileForRead();
   if (!f) {
     _server.send(404, "text/plain", "Log-Datei nicht gefunden oder SD-Fehler.");
     return;
   }
+
+  // Re-arm the Shelly watchdog grace window BEFORE streamFile().
+  //
+  // streamFile() blocks loop() for the entire file transfer -- typically
+  // 5-12 s for a day-long log at softAP TCP throughput (~500-800 KB/s).
+  // During that time the Shelly keeps pushing but gets no HTTP responses,
+  // so all pushes time out. Without this call the watchdog (5 x 1000 ms =
+  // 5 s) would trip mid-download, set shellyOk()=false, blink the error
+  // LED, and stop logging for several seconds after the download ends.
+  //
+  // beginStartupGrace() sets _graceActive=true and restarts the 15 s timer.
+  // The first successful push after streamFile() returns clears the grace
+  // flag immediately -- no data is lost and no spurious error is shown.
+  //
+  // Side-effect: a genuine Shelly failure that starts exactly during a
+  // download will not be detected until 15 s after the download ends.
+  // This is acceptable -- the download is a deliberate human action and
+  // the system recovers automatically without any user intervention.
+  _shelly.beginStartupGrace();
+  Serial.println("[Web] GET /download -- Watchdog-Grace reaktiviert fuer Uebertragung");
+
   _server.sendHeader("Content-Type", "text/csv");
   _server.sendHeader("Content-Disposition", "attachment; filename=log.csv");
   _server.streamFile(f, "text/csv");
   f.close();
   _logger.reopenAfterRead();
-  Serial.printf("[Web] GET /download %lu ms\n", millis() - t0);
+
+  Serial.printf("[Web] GET /download abgeschlossen in %lu ms\n", millis() - t0);
 }
 
 void WebPortal::handleReset() {
