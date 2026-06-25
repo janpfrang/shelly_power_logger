@@ -1,21 +1,9 @@
 /*
- * Logger.h v8  (Shelly + ESP32 + OTA-aware + DS3231 RTC + batch drain)
- * =====================================================================
+ * Logger.h v7  (Shelly + ESP32 + OTA-aware + DS3231 RTC)
+ * ==========================================
  *
- * Changes vs. v7
+ * Changes vs. v5
  * --------------
- *   CHANGED  pollIfDue() — drains ShellyClient pending queue
- *              When the Shelly sends a startup batch ({"batch":[…]}),
- *              ShellyClient::ingestBatch() queues up to 10 pre-connection
- *              samples.  pollIfDue() now checks hasPendingSamples() first:
- *              if samples are pending it consumes one per tick (respecting
- *              _pollIntervalMs) and back-dates both millis_ts and unix_ts
- *              using nextPendingMsAgo() so the CSV timestamps reflect when
- *              the Shelly actually took the measurement, not when the ESP32
- *              processed it.  Normal single-sample operation is unchanged.
- *
- * Changes vs. v5 (kept for history)
- * ----------------------------------
  *   ADDED  _otaInProgress flag (bool, default false)
  *   ADDED  setOtaInProgress(bool)  -- called by WebPortal OTA handlers
  *   ADDED  isOtaInProgress()       -- read by WebPortal for /api/live response
@@ -85,8 +73,6 @@ struct Sample {
   float    voltage_V;
   float    power_W;
   float    pf;          // stores pf_apparent in this firmware version
-  float    supply_V;    // 9V-rail in volts at time of sample (0.0 = monitor disabled)
-  bool     power_lost;  // true if undervoltage was triggered at time of this sample
 };
 
 class Logger {
@@ -106,8 +92,6 @@ public:
       _lastVoltage(NAN),
       _lastPower(NAN),
       _lastPf(NAN),
-      _lastSupplyV(0.0f),
-      _lastPowerLost(false),
       _sdOk(false),
       _otaInProgress(false),
       _pollIntervalMs(INTERVAL_SHELLY_POLL_MS),   // 1000 ms default
@@ -155,26 +139,23 @@ public:
 
   // -- Called from loop() every iteration -----------------------------------
   //
-  // Two operating modes, selected automatically:
-  //
-  //   A. BATCH DRAIN (startup)
-  //      When the Shelly sends a {"batch":[…]} on first connection,
-  //      ShellyClient::ingestBatch() fills a pending queue.  Each call
-  //      to pollIfDue() consumes one sample from that queue, back-dating
-  //      millis_ts and unix_ts so CSV rows carry the time the Shelly
-  //      actually took the measurement.  The poll-interval timer is
-  //      still honoured so the ring buffer fills at a controlled rate.
-  //
-  //   B. NORMAL (steady state)
-  //      Reads the latest cached value from ShellyClient, unchanged
-  //      from v7.
+  // pollIfDue() used to call _pzem.voltage() etc. synchronously.
+  // Now it reads the last value cached by ShellyClient::ingest().
+  // The "poll interval" is still honoured -- we don't push a sample to the
+  // ring-buffer more often than _pollIntervalMs even if the Shelly pushes
+  // faster (it shouldn't, but belt-and-suspenders).
   void pollIfDue() {
+    // Suspend all sampling while a firmware update is being written.
+    // The Shelly watchdog will trip (expected -- see header note).
     if (_otaInProgress) return;
 
     uint32_t now = millis();
     if (now - _lastPollMs < _pollIntervalMs) return;
     _lastPollMs = now;
 
+    // If the Shelly watchdog has timed out or data is not yet valid,
+    // do not push a sample -- just update live display fields to NAN so
+    // the web UI shows "--" and the LED turns red.
     if (!_shelly.shellyOk() || !_shelly.hasData()) {
       _lastVoltage = NAN;
       _lastPower   = NAN;
@@ -182,52 +163,21 @@ public:
       return;
     }
 
-    // ── Mode A: drain one pending batch sample ────────────────────────────
-    if (_shelly.hasPendingSamples()) {
-      int32_t msAgo = _shelly.nextPendingMsAgo();
-      _shelly.consumePendingSample();     // advances _latest in ShellyClient
-
-      float V  = _shelly.getVoltage();
-      float P  = _shelly.getPower();
-      float PF = _shelly.getPfApparent();
-
-      _lastVoltage = V;
-      _lastPower   = P;
-      _lastPf      = PF;
-
-      if (P >= _powerThresholdW) {
-        // Back-date millis_ts: subtract how long ago the Shelly took this sample.
-        uint32_t millis_backdated = (msAgo < (int32_t)now)
-                                    ? (now - (uint32_t)msAgo)
-                                    : 0;
-
-        // Back-date unix_ts by the same offset (integer seconds).
-        uint32_t uts = 0;
-        if (_rtc != nullptr) {
-          uint32_t nowUts = (uint32_t)_rtc->now().unixtime();
-          uint32_t secsAgo = (uint32_t)(msAgo / 1000);
-          uts = (nowUts > secsAgo) ? (nowUts - secsAgo) : 0;
-        }
-
-        pushSample({ millis_backdated, uts, V, P, PF, _lastSupplyV, _lastPowerLost });
-        Serial.printf("[Logger] batch sample (-%lu ms ago): V=%.1f P=%.1f\n",
-                      (unsigned long)msAgo, V, P);
-      }
-      return;
-    }
-
-    // ── Mode B: normal single-sample path (unchanged from v7) ─────────────
     float V  = _shelly.getVoltage();
     float P  = _shelly.getPower();
     float PF = _shelly.getPfApparent();
 
+    // Update live-display cache (shown in /api/live regardless of threshold)
     _lastVoltage = V;
     _lastPower   = P;
     _lastPf      = PF;
 
+    // Apply logging threshold (Req 8): only store sample if P >= threshold
     if (P >= _powerThresholdW) {
+      // Capture wall-clock time from DS3231. Returns 0 when RTC is absent
+      // or has lost power -- CSV writes 'RTC_NOT_SET' for those rows.
       uint32_t uts = (_rtc != nullptr) ? (uint32_t)_rtc->now().unixtime() : 0;
-      pushSample({ now, uts, V, P, PF, _lastSupplyV, _lastPowerLost });
+      pushSample({ now, uts, V, P, PF });
     }
   }
 
@@ -252,10 +202,7 @@ public:
   bool flushToSD() {
     if (!_sdOk || _bufferCount == 0) return _sdOk;
 
-    uint32_t t0 = millis();
     File f = SD.open(LOG_FILE_PATH, FILE_APPEND);
-    uint32_t t1 = millis();
-
     if (!f) {
       Serial.println("[Logger] SD-Open fehlgeschlagen, markiere SD als defekt");
       _sdOk = false;
@@ -263,6 +210,8 @@ public:
     }
 
     for (size_t i = 0; i < _bufferCount; i++) {
+      // Format wall-clock timestamp as ISO-8601: YYYY-MM-DDTHH:MM:SS
+      // unix_ts == 0 means the RTC was absent or not set.
       char dtbuf[20];
       if (_buffer[i].unix_ts > 0) {
         DateTime dt(_buffer[i].unix_ts);
@@ -272,52 +221,20 @@ public:
       } else {
         snprintf(dtbuf, sizeof(dtbuf), "RTC_NOT_SET");
       }
-      f.printf("%s,%lu,%.1f,%.1f,%.2f,%.2f,%d\n",
+      f.printf("%s,%lu,%.1f,%.1f,%.2f\n",
                dtbuf,
                (unsigned long)_buffer[i].millis_ts,
                _buffer[i].voltage_V,
                _buffer[i].power_W,
-               _buffer[i].pf,
-               _buffer[i].supply_V,
-               _buffer[i].power_lost ? 1 : 0);
+               _buffer[i].pf);
     }
-
-    uint32_t t2 = millis();
     f.flush();
-    uint32_t t3 = millis();
     f.close();
-    uint32_t t4 = millis();
 
-    Serial.printf("[Logger] %u Samples SD: open=%lums write=%lums flush=%lums close=%lums total=%lums\n",
-                  (unsigned)_bufferCount,
-                  (unsigned long)(t1-t0),
-                  (unsigned long)(t2-t1),
-                  (unsigned long)(t3-t2),
-                  (unsigned long)(t4-t3),
-                  (unsigned long)(t4-t0));
+    Serial.printf("[Logger] %u Samples auf SD geschrieben\n",
+                  (unsigned)_bufferCount);
     _bufferCount = 0;
     return true;
-  }
-
-  // -- Emergency flush on power loss ----------------------------------------
-  bool flushPowerLost(float supplyV) {
-    for (size_t i = 0; i < _bufferCount; i++) {
-      _buffer[i].power_lost = true;
-    }
-    if (_bufferCount < RAM_BUFFER_SIZE) {
-      uint32_t now = millis();
-      uint32_t uts = (_rtc != nullptr) ? (uint32_t)_rtc->now().unixtime() : 0;
-      Sample sentinel;
-      sentinel.millis_ts  = now;
-      sentinel.unix_ts    = uts;
-      sentinel.voltage_V  = isnan(_lastVoltage) ? 0.0f : _lastVoltage;
-      sentinel.power_W    = isnan(_lastPower)   ? 0.0f : _lastPower;
-      sentinel.pf         = isnan(_lastPf)      ? 0.0f : _lastPf;
-      sentinel.supply_V   = supplyV;
-      sentinel.power_lost = true;
-      _buffer[_bufferCount++] = sentinel;
-    }
-    return flushToSD();
   }
 
   // -- Reset log file (POST /reset handler) -- unchanged from v4 -------------
@@ -345,14 +262,8 @@ public:
   float    getLastVoltage()    const { return _lastVoltage; }
   float    getLastPower()      const { return _lastPower; }
   float    getLastPf()         const { return _lastPf; }
-  float    getLastSupplyV()    const { return _lastSupplyV; }
   size_t   getBufferCount()    const { return _bufferCount; }
   uint32_t getDroppedSamples() const { return _droppedSamples; }
-
-  // Called from loop() after powerMonitor.update() -- stores latest rail
-  // voltage so pollIfDue() can stamp it into each Sample.
-  void setLastSupplyV(float v)      { _lastSupplyV   = v; }
-  void setLastPowerLost(bool lost)  { _lastPowerLost = lost; }
 
   File openLogFileForRead() {
     if (!_sdOk) return File();
@@ -372,8 +283,6 @@ private:
   float         _lastVoltage;
   float         _lastPower;
   float         _lastPf;
-  float         _lastSupplyV;    // 9V-rail cached from PowerMonitor (V)
-  bool          _lastPowerLost;  // undervoltage trigger state at last sample
   bool          _sdOk;
   bool          _otaInProgress;   // true while WebPortal is writing OTA flash
   uint32_t      _pollIntervalMs;
@@ -402,7 +311,7 @@ private:
   }
 
   bool initSDCard() {
-    return SD.begin(PIN_SD_CS, _sdSPI, 20000000);  // 20 MHz -- was 4 MHz
+    return SD.begin(PIN_SD_CS, _sdSPI, 4000000);
   }
 
   // -- SD auto-recovery every 30 s (unchanged from v4) ----------------------
