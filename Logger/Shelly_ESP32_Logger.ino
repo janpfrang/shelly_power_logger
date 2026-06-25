@@ -6,12 +6,10 @@
  *
  * Changes vs. v3
  * --------------
- *   CHANGED  Logger logger -- now takes &powerMonitor.isPowerLost() as third
- *            argument (const bool* powerLostPtr) so Logger::pollIfDue() can
- *            stamp every Sample with supply_V and power_down without depending
- *            on PowerMonitor.h directly.
- *   NOTE     Logger must be declared AFTER PowerMonitor so the latch flag
- *            address is valid at construction time.
+ *   CHANGED  loop() -- calls logger.setPowerLost(powerMonitor.isPowerLost()) each
+ *            iteration so Logger::pollIfDue() can stamp supply_V and power_down
+ *            into every Sample.  No pointer injection; no compile-time dependency
+ *            between Logger.h and PowerMonitor.h.
  *
  * Changes vs. v1
  * --------------
@@ -88,17 +86,17 @@
 
 // ── Object instantiation order matters:
 //    ShellyClient has no dependencies.
-//    PowerMonitor has no dependencies (declared before Logger so its latch
-//      flag address is valid when Logger is constructed).
-//    Logger depends on ShellyClient + optionally RTC + optionally PowerMonitor latch.
+//    Logger depends on ShellyClient + optionally RTC.
 //    WebPortal depends on both Logger and ShellyClient.
+//    PowerMonitor has no dependencies.
+//    Power-loss flag is passed to Logger each loop() via logger.setPowerLost(),
+//    avoiding any compile-time dependency between Logger.h and PowerMonitor.h.
 ShellyClient shelly;
 RTC_DS3231   rtc;
-PowerMonitor powerMonitor;                          // must precede Logger
-Logger       logger(shelly, &rtc,
-                   powerMonitor.getPowerLostPtr()); // supply_V + power_down columns
+Logger       logger(shelly, &rtc);   // powerLost flag updated each loop via setPowerLost()
 WebPortal    webPortal(logger, shelly);
 StatusLed    statusLed;
+PowerMonitor powerMonitor;
 
 // Forward declaration (Arduino auto-prototypes, but explicit is clearer).
 void handlePowerLoss();
@@ -165,6 +163,9 @@ void loop() {
   if (powerMonitor.isPowerLost()) {
     handlePowerLoss();
   }
+  // Propagate the power-loss latch flag to Logger so pollIfDue() can stamp
+  // supply_V and power_down into every Sample without needing PowerMonitor.h.
+  logger.setPowerLost(powerMonitor.isPowerLost());
 
   // 1. Service HTTP requests FIRST so that any arriving Shelly push is
   //    ingested into the ShellyClient cache before pollIfDue() reads it.
