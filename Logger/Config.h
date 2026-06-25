@@ -124,7 +124,7 @@
                                            // (was 3000 -- too short; AP needs ~500 ms to
                                            //  start, leaving almost no margin before the
                                            //  first loop() checks began firing)
-#define POWER_CHECK_INTERVAL_MS     200    // how often the rail is sampled
+#define POWER_CHECK_INTERVAL_MS     200    // how often the rail is saampled
 #define POWER_ADC_SAMPLES            16    // oversampling count (noise ~ 1/sqrt(N))
 #define POWER_ADC_SAMPLE_GAP_US     200    // spacing between oversamples
 #define POWER_MAJORITY_COUNT          3    // consecutive low reads required to trigger
@@ -136,7 +136,7 @@
 // ===== WLAN =====
 #define WIFI_AP_SSID        "PZEM_Logger"    // Shelly must be pre-paired to this SSID
 #define WIFI_AP_PASSWORD    "logger1234"     // >= 8 chars; change for your deployment
-#define WIFI_AP_HOSTNAME    "braun_PZEM"     // -> http://braun_PZEM.local  (mDNS)
+#define WIFI_AP_HOSTNAME    "braun_PZEM"     // -> http://braun_PZEM.local   (mDNS)
 #define DNS_PORT            53
 
 // ===== SD-Karte =====
