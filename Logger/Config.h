@@ -1,6 +1,15 @@
 /*
- * Config.h - Zentrale Konfiguration v9  (Shelly + ESP32 + OTA + Power-loss + RTC)
- * ==============================================================================
+ * Config.h - Zentrale Konfiguration v10  (Shelly + ESP32 + OTA + Power-loss + RTC)
+ * ===============================================================================
+ *
+ * Changes vs. v9:
+ *   CHANGED  POWER_MONITOR_ENABLED  0 -> 1
+ *              9V rail + supercapacitor + resistor-divider circuit (R1=180k, R2=47k)
+ *              is now fully populated on the PCB.  Undervoltage sensing on GPIO 35
+ *              is active again (Req 13).
+ *              The 10 s startup grace (POWER_STARTUP_GRACE_MS) and majority-voting
+ *              (POWER_MAJORITY_COUNT=3) remain as protection against false triggers
+ *              during WiFi-AP startup and ADC noise during SD writes / Shelly pushes.
  *
  * Changes vs. v7 (Shelly + ESP32 + OTA + Power-loss):
  *   ADDED    POWER_MONITOR_ENABLED  -- set to 0 to disable the power-loss
@@ -130,7 +139,7 @@
 //   the softAP disappears before anyone can connect.
 // With this flag = 0, PowerMonitor::update() and isPowerLost() are
 // no-ops; all other firmware is completely unaffected.
-#define POWER_MONITOR_ENABLED      0       // <<<  set to 1 once HW circuit is built
+#define POWER_MONITOR_ENABLED      1       // HW circuit populated -- undervoltage sensing active
 
 #define POWER_THRESHOLD_LOW_MV     7350    // trigger shutdown below this (mV, 9V rail)
 #define POWER_THRESHOLD_HIGH_MV    7750    // hysteresis: clear / recover above this (mV)
@@ -138,7 +147,7 @@
                                            // (was 3000 -- too short; AP needs ~500 ms to
                                            //  start, leaving almost no margin before the
                                            //  first loop() checks began firing)
-#define POWER_CHECK_INTERVAL_MS     200    // how often the rail is saampled
+#define POWER_CHECK_INTERVAL_MS     200    // how often the rail is sampled
 #define POWER_ADC_SAMPLES            16    // oversampling count (noise ~ 1/sqrt(N))
 #define POWER_ADC_SAMPLE_GAP_US     200    // spacing between oversamples
 #define POWER_MAJORITY_COUNT          3    // consecutive low reads required to trigger
