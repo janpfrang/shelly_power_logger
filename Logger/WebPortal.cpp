@@ -999,7 +999,19 @@ bool WebPortal::begin() {
 }
 
 void WebPortal::update() {
-  _dns.processNextRequest();
+  // Process DNS only every 50 ms -- iOS/Windows send captive portal probes
+  // in bursts; without rate-limiting they starve handleClient().
+  static uint32_t lastDnsMs = 0;
+  uint32_t now = millis();
+  if (now - lastDnsMs >= 50) {
+    _dns.processNextRequest();
+    lastDnsMs = now;
+  }
+
+  // Call handleClient() 3x per loop() iteration so a queued HTTP request
+  // (e.g. page load after tap) doesn't wait a full loop cycle to be served.
+  _server.handleClient();
+  _server.handleClient();
   _server.handleClient();
 }
 
