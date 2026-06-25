@@ -95,6 +95,10 @@
 #include <SPI.h>
 #include <SD.h>
 #include "Config.h"
+#include "PowerMonitor.h"  // needed here: Arduino CLI compiles headers alphabetically,
+                           // so Logger.h is seen before PowerMonitor.h regardless of
+                           // the #include order in the .ino.  No circular dependency:
+                           // PowerMonitor.h only includes Config.h.
 #include "RTClib.h"        // Adafruit RTClib -- DS3231 driver
 #include "ShellyClient.h"
 
@@ -112,7 +116,8 @@ class Logger {
 public:
   // ShellyClient is injected; RTC_DS3231 is optional (nullptr = no RTC).
   // powerLostPtr: pointer to PowerMonitor::isPowerLost() latch flag, injected
-  //   from the .ino so Logger can read it without depending on PowerMonitor.h.
+  //   from the .ino. PowerMonitor.h is now included directly in Logger.h (Arduino
+  //   CLI compiles headers alphabetically, not in .ino include order).
   //   Pass nullptr (default) when POWER_MONITOR_ENABLED == 0 or in unit tests.
   explicit Logger(ShellyClient& shelly,
                   RTC_DS3231*   rtc           = nullptr,
