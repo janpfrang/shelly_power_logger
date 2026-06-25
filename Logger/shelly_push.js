@@ -16,7 +16,7 @@
  *
  * WHAT IT DOES
  * ------------
- * Every PUSH_INTERVAL_MS (default: 1000 ms) the script:
+ * Every PUSH_INTERVAL_MS (default: 1200 ms) the script:
  *   1. Reads Switch component status (apower, voltage, current)
  *   2. Derives pf_apparent = apower / (voltage * current)
  *   3. POSTs a JSON body to http://192.168.4.1/api/shelly_push
@@ -48,7 +48,7 @@
  *
  * REQUIREMENTS MET
  * ----------------
- * Req 1   – push interval = PUSH_INTERVAL_MS (default 1 s, matches meter cadence)
+ * Req 1   – push interval = PUSH_INTERVAL_MS (1.2 s; above meter cadence of 1 s to add push/timeout margin)
  * Req 7b  – apower and voltage logged directly from Switch.GetStatus
  * Req 7c  – pf_apparent derived on-device before transmission
  * Req 9   – data delivered to ESP32 via local Wi-Fi (no internet)
@@ -57,7 +57,32 @@
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 
-var PUSH_INTERVAL_MS = 1000;          // Must match ESP32 INTERVAL_SHELLY_POLL_MS
+// PUSH_INTERVAL_MS = 1200 ms (was 1000 ms).
+//
+// Why 1200 and not 1000:
+//   The Shelly mJS timer is non-compensating: each fire is 1000 ms after the
+//   *previous callback completes*, not after it was scheduled.  With HTTP
+//   timeout = 1 s (below), the callback can return up to ~1 s after doPush()
+//   started, meaning the next tick fires as little as 0 ms after _pushPending
+//   is cleared — a race that drops every tick where the ESP32 is even slightly
+//   slow (SD flush, incoming browser request, etc.).
+//
+//   Setting PUSH_INTERVAL_MS = 1200 ms and timeout = 2 s decouples the two:
+//     - HTTP.Request has 2 s to complete before it is abandoned.
+//     - Next timer fires 1200 ms after the callback returns — so at worst
+//       1200 ms after the request was abandoned (~3200 ms after doPush start).
+//     - The ESP32 watchdog window is SHELLY_ERROR_THRESHOLD(5) x 1000 ms =
+//       5000 ms, comfortably larger than any realistic push gap.
+//
+//   The 200 ms gap (1200 - 1000) is the hard margin between timeout clearing
+//   _pushPending and the next timer fire.  Even if the Shelly's event loop
+//   runs late, 200 ms is ample.
+//
+//   Shelly's internal energy meter updates at 1 Hz; the measurement value at
+//   1200 ms is no more stale than at 1000 ms — the Shelly reads the latest
+//   Switch.GetStatus each tick, so cadence only affects logging resolution,
+//   not measurement accuracy.
+var PUSH_INTERVAL_MS = 1200;         // was 1000; see rationale above
 var ESP32_IP         = "192.168.4.1"; // ESP32 softAP gateway — never changes (Option B)
 var PUSH_URL         = "http://" + ESP32_IP + "/api/shelly_push";
 var SWITCH_ID        = 0;             // Plug S has a single switch channel, id=0
@@ -148,10 +173,14 @@ function doPush() {
       url:     PUSH_URL,
       headers: {"Content-Type": "application/json"},
       body:    body,
-      timeout: 1   // seconds; MUST be < PUSH_INTERVAL_MS/1000 (1 s) so _pushPending
-                   // is always cleared before the next tick fires.
-                   // At 2 s the flag could stay set across a tick boundary during
-                   // ESP32 boot/reconnect, causing the watchdog to trip permanently.
+      timeout: 2   // seconds.  Must be < PUSH_INTERVAL_MS/1000 (1.2 s rounded
+                   // down = 1 s ceiling for the Shelly runtime, so 2 s is the
+                   // next safe integer).
+                   // With PUSH_INTERVAL_MS = 1200 ms: the callback clears
+                   // _pushPending, then the next timer fires 1200 ms later —
+                   // giving a guaranteed 200 ms gap between flag clear and next
+                   // doPush() entry.  At 1 s timeout + 1000 ms interval that
+                   // gap was 0 ms (race condition).
     },
     function(result, error_code, error_msg) {
       _pushPending = false;
