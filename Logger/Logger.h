@@ -95,10 +95,6 @@
 #include <SPI.h>
 #include <SD.h>
 #include "Config.h"
-#include "PowerMonitor.h"  // needed here: Arduino CLI compiles headers alphabetically,
-                           // so Logger.h is seen before PowerMonitor.h regardless of
-                           // the #include order in the .ino.  No circular dependency:
-                           // PowerMonitor.h only includes Config.h.
 #include "RTClib.h"        // Adafruit RTClib -- DS3231 driver
 #include "ShellyClient.h"
 
@@ -115,16 +111,14 @@ struct Sample {
 class Logger {
 public:
   // ShellyClient is injected; RTC_DS3231 is optional (nullptr = no RTC).
-  // powerLostPtr: pointer to PowerMonitor::isPowerLost() latch flag, injected
-  //   from the .ino. PowerMonitor.h is now included directly in Logger.h (Arduino
-  //   CLI compiles headers alphabetically, not in .ino include order).
-  //   Pass nullptr (default) when POWER_MONITOR_ENABLED == 0 or in unit tests.
+  // The power-loss flag is set externally via setPowerLost(bool) called from
+  // loop() after powerMonitor.isPowerLost() -- avoids any dependency on
+  // PowerMonitor.h inside Logger.h (prevents Arduino CLI header-ordering issues).
   explicit Logger(ShellyClient& shelly,
-                  RTC_DS3231*   rtc           = nullptr,
-                  const bool*   powerLostPtr  = nullptr)
+                  RTC_DS3231*   rtc = nullptr)
     : _shelly(shelly),
       _rtc(rtc),
-      _powerLostPtr(powerLostPtr),
+      _powerLostFlag(false),
       _sdSPI(VSPI),
       _bufferCount(0),
       _droppedSamples(0),
@@ -180,6 +174,10 @@ public:
 
   bool isOtaInProgress() const { return _otaInProgress; }
 
+  // Called from loop() immediately after powerMonitor.isPowerLost() is checked.
+  // Decouples Logger from PowerMonitor.h -- no include dependency needed.
+  void setPowerLost(bool lost) { _powerLostFlag = lost; }
+
   // -- Called from loop() every iteration -----------------------------------
   //
   // pollIfDue() used to call _pzem.voltage() etc. synchronously.
@@ -226,7 +224,7 @@ public:
     float supplyV = (float)(((uint64_t)_supplyMv *
                     (DIVIDER_R_TOP_OHM + DIVIDER_R_BOTTOM_OHM)) /
                     DIVIDER_R_BOTTOM_OHM) / 1000.0f;
-    uint8_t pdFlag = (_powerLostPtr != nullptr && *_powerLostPtr) ? 1 : 0;
+    uint8_t pdFlag = _powerLostFlag ? 1 : 0;
 #else
     float   supplyV = 0.0f;
     uint8_t pdFlag  = 0;
@@ -371,7 +369,7 @@ public:
 private:
   ShellyClient& _shelly;        // injected reference -- not owned
   RTC_DS3231*   _rtc;           // optional injected pointer -- not owned (nullptr = no RTC)
-  const bool*   _powerLostPtr;  // points to PowerMonitor latch flag; nullptr = no monitor
+  bool          _powerLostFlag; // set via setPowerLost() from loop(); no PowerMonitor.h dep
   SPIClass      _sdSPI;
   File          _logFile;     // persistent write handle -- opened once, never closed between flushes
   Sample        _buffer[RAM_BUFFER_SIZE];
