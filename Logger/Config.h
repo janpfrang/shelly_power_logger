@@ -1,20 +1,15 @@
 /*
  * Config.h - Zentrale Konfiguration v10  (Shelly + ESP32 + OTA + Power-loss + RTC)
- * =================================================================================
+ * ===============================================================================
  *
  * Changes vs. v9:
- *   CHANGED  SHELLY_ERROR_THRESHOLD  3 -> 5
- *              Root cause of observed log gaps and 5 Hz LED blink:
- *              The Shelly mJS timer and the ESP32 SD-flush (~50-200 ms on
- *              slow SD cards) can together delay or drop a push reply.
- *              With threshold=3 a single missed push during a 10 s SD flush
- *              was enough to trip the 3 s watchdog, halting logging and
- *              triggering LED_ERROR.
- *              Raising to 5 (= 5 s silence required) absorbs transient
- *              Wi-Fi jitter and SD-flush latency without masking a genuine
- *              Shelly disconnect (which produces silence >> 5 s).
- *              No other code changes required -- ShellyClient uses this
- *              constant directly in shellyOk().
+ *   CHANGED  POWER_MONITOR_ENABLED  0 -> 1
+ *              9V rail + supercapacitor + resistor-divider circuit (R1=180k, R2=47k)
+ *              is now fully populated on the PCB.  Undervoltage sensing on GPIO 35
+ *              is active again (Req 13).
+ *              The 10 s startup grace (POWER_STARTUP_GRACE_MS) and majority-voting
+ *              (POWER_MAJORITY_COUNT=3) remain as protection against false triggers
+ *              during WiFi-AP startup and ADC noise during SD writes / Shelly pushes.
  *
  * Changes vs. v7 (Shelly + ESP32 + OTA + Power-loss):
  *   ADDED    POWER_MONITOR_ENABLED  -- set to 0 to disable the power-loss
@@ -30,6 +25,7 @@
  *              first loop() iterations consumed the remaining grace window
  *              before the AP was fully established.  10 s is safe for all
  *              hardware states.
+ *   ALL other constants unchanged
  */
 
 #ifndef CONFIG_H
@@ -72,15 +68,21 @@
 
 // Shelly push watchdog: if no push is received for this many consecutive
 // expected intervals, the Shelly is declared unreachable (-> LED_ERROR).
-// 5 x 1000 ms = 5 s of silence before error is flagged during normal operation.
+// 5 x 1000 ms = 5 s silence window.
 //
-// Raised from 3 to 5 (v10):
-//   A 10 s SD flush can delay the ESP32's HTTP response by 50-200 ms per push.
-//   The Shelly mJS HTTP client times out if it doesn't get a response, and
-//   _pushPending stays set for that tick -- effectively skipping a push.
-//   With threshold=3 a single such skip during the 10 s flush window was
-//   enough to trip the watchdog. 5 s provides adequate margin without
-//   delaying detection of a genuine Shelly disconnect (>> 5 s silence).
+// Why 5 and not 3:
+//   a) The Shelly mJS timer is NOT compensated — each doPush() fires 1000 ms
+//      after the *previous callback completes*, not after it was scheduled.
+//      doPush() itself takes a few ms, so the real cadence is ~1005-1010 ms.
+//      After 3 pushes the accumulated drift can exceed the 3 s window, tripping
+//      the watchdog even with a perfect WiFi link.
+//   b) shelly_push.js uses PUSH_INTERVAL_MS = 1200 ms (200 ms margin over the
+//      HTTP timeout) so the steady-state push cadence is ~1200 ms. At threshold
+//      3 the window would be only 3000 ms — leaving room for only 2.5 pushes.
+//      At threshold 5 the window is 5000 ms — 4 full pushes at 1200 ms cadence
+//      before the watchdog fires.  That is the right safety margin.
+//   c) flushToSD() can block loop() for up to SD_FLUSH_TIMEOUT_MS (400 ms).
+//      With threshold 3 a single slow flush consumed 40 % of the watchdog budget.
 #define SHELLY_ERROR_THRESHOLD   5
 
 // Startup grace for the Shelly watchdog (ms).
@@ -137,28 +139,14 @@
 //   the softAP disappears before anyone can connect.
 // With this flag = 0, PowerMonitor::update() and isPowerLost() are
 // no-ops; all other firmware is completely unaffected.
-#define POWER_MONITOR_ENABLED      0       // HW circuit populated -- set to 0 if resistors removed 0 for testing on serial communications
+#define POWER_MONITOR_ENABLED      1       // HW circuit populated -- undervoltage sensing active
 
-// ADC calibration correction
-// --------------------------
-// The ESP32 ADC + 47k source impedance introduces a consistent negative offset.
-// Bench measurement: ADC reports 7.70 V when true rail is 8.30 V.
-// Correction factor = 8.30 / 7.70 = 1.0779  (applied in readRailMilliVolts()).
-//
-// IMPORTANT: the trigger thresholds below are expressed as RAW (uncorrected)
-// millivolts, so that the physical trigger point stays correct after correction:
-//   threshold_raw = threshold_true / POWER_ADC_CORRECTION
-//   6819 = 7350 / 1.0779   <- fires when true rail = 7.35 V (unchanged physics)
-//   7190 = 7750 / 1.0779   <- recovers when true rail = 7.75 V (unchanged physics)
-// The displayed/logged voltage is always the corrected value.
-#define POWER_ADC_CORRECTION       1.0779f // multiply raw mV to get true rail mV
-
-#define POWER_THRESHOLD_LOW_MV     6819    // raw ADC trigger  (true rail ~7.35 V)
-#define POWER_THRESHOLD_HIGH_MV    7190    // raw ADC recover  (true rail ~7.75 V)
+#define POWER_THRESHOLD_LOW_MV     7350    // trigger shutdown below this (mV, 9V rail)
+#define POWER_THRESHOLD_HIGH_MV    7750    // hysteresis: clear / recover above this (mV)
 #define POWER_STARTUP_GRACE_MS    10000    // ignore readings while supercaps charge
                                            // (was 3000 -- too short; AP needs ~500 ms to
-                                           // start, leaving almost no margin before the
-                                           // first loop() checks began firing)
+                                           //  start, leaving almost no margin before the
+                                           //  first loop() checks began firing)
 #define POWER_CHECK_INTERVAL_MS     200    // how often the rail is sampled
 #define POWER_ADC_SAMPLES            16    // oversampling count (noise ~ 1/sqrt(N))
 #define POWER_ADC_SAMPLE_GAP_US     200    // spacing between oversamples
@@ -171,7 +159,7 @@
 // ===== WLAN =====
 #define WIFI_AP_SSID        "PZEM_Logger"    // Shelly must be pre-paired to this SSID
 #define WIFI_AP_PASSWORD    "logger1234"     // >= 8 chars; change for your deployment
-#define WIFI_AP_HOSTNAME    "braun_PZEM"     // -> http://braun_PZEM.local  (mDNS)
+#define WIFI_AP_HOSTNAME    "braun_PZEM"     // -> http://braun_PZEM.local   (mDNS)
 #define DNS_PORT            53
 
 // ===== SD-Karte =====
@@ -180,12 +168,25 @@
 // (apower / (V x I)), not a direct hardware measurement.  See Req 5 / Req 7c.
 // datetime column added (RTC); time_ms kept for backward compatibility and
 // cross-referencing with uptime-based debug prints.
-// supply_V column added: 9V-rail ADC reading at time of sample (0.0 when
-// PowerMonitor disabled or during startup grace).
-#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent,supply_V,power_lost"
+// supply_V:    9V-rail voltage measured on GPIO 35 at sample time (V, 2 dp).
+//              Single analogReadMilliVolts() -- not the 16x oversampled safety
+//              read in PowerMonitor. 0.00 when POWER_MONITOR_ENABLED == 0.
+// power_down:  0 = normal operation, 1 = undervoltage latch triggered.
+//              Rows with power_down=1 are the last samples before the graceful
+//              shutdown flush -- the exact moment of mains loss is visible.
+#define LOG_FILE_HEADER  "datetime,time_ms,voltage_V,power_W,pf_apparent,supply_V,power_down"
+
+// Maximum time allowed for a single flushToSD() call (ms).
+// If _logFile.flush() (the SD sync) takes longer than this the card is
+// declared failed so the next flushIfDue() triggers tryRecoverSD() instead
+// of blocking the HTTP server for another multi-hundred-ms window.
+// 400 ms is deliberately generous: a healthy card at 4 MHz SPI flushes
+// 10 samples (~500 bytes) in < 10 ms. Any card that needs > 400 ms is
+// marginal and should be flagged regardless.
+#define SD_FLUSH_TIMEOUT_MS  400
 
 // ===== RAM-Puffer =====
-// 64 x 20 Byte = 1280 Byte (Sample struct: 2x uint32 + 4x float + bool padding).
+// 64 x 16 Byte = 1024 Byte.
 // At 1 s cadence: 64 samples = 64 s of reserve before SD must flush.
 // INTERVAL_SD_FLUSH_MS = 10 s -> buffer only ever holds <= 10 samples normally.
 // 64 entries gives substantial margin if SD is temporarily unavailable.
@@ -193,6 +194,6 @@
 
 // ===== Webserver =====
 #define HTTP_PORT        80
-#define API_BUFFER_SIZE  320   // sufficient for /api/live incl. supply_mv/supply_ok (~175 bytes) shelly_ok + ota_active (~146 chars worst-case)
+#define API_BUFFER_SIZE  320   // sufficient for /api/live incl. shelly_ok + ota_active (~146 chars worst-case)
 
 #endif

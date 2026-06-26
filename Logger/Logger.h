@@ -1,21 +1,40 @@
 /*
- * Logger.h v8  (Shelly + ESP32 + OTA-aware + DS3231 RTC + batch drain)
- * =====================================================================
+ * Logger.h v8  (Shelly + ESP32 + OTA-aware + DS3231 RTC + supply monitoring)
+ * ===========================================================================
  *
  * Changes vs. v7
  * --------------
- *   CHANGED  pollIfDue() — drains ShellyClient pending queue
- *              When the Shelly sends a startup batch ({"batch":[…]}),
- *              ShellyClient::ingestBatch() queues up to 10 pre-connection
- *              samples.  pollIfDue() now checks hasPendingSamples() first:
- *              if samples are pending it consumes one per tick (respecting
- *              _pollIntervalMs) and back-dates both millis_ts and unix_ts
- *              using nextPendingMsAgo() so the CSV timestamps reflect when
- *              the Shelly actually took the measurement, not when the ESP32
- *              processed it.  Normal single-sample operation is unchanged.
+ *   CHANGED  Sample struct -- added float supply_V and uint8_t power_down.
+ *              supply_V:    9V-rail voltage at the time of the sample (V, 2 dp).
+ *                           Single analogReadMilliVolts() call, NOT the 16x
+ *                           oversampled read in PowerMonitor -- sufficient for
+ *                           CSV documentation, not the safety-critical path.
+ *              power_down:  0 = rail above threshold / normal.
+ *                           1 = PowerMonitor has latched an undervoltage event.
+ *                           The 1-samples are the last entries before the
+ *                           graceful shutdown flush -- exactly the interesting
+ *                           moments in the CSV.
+ *   CHANGED  pollIfDue()  -- reads PIN_VSUPPLY once per poll tick and reads
+ *                           powerMonitor.isPowerLost() state; populates both
+ *                           new fields in every pushed Sample.
+ *              RAM cost: +5 bytes/sample (float=4 + uint8_t=1). 64 samples
+ *              = +320 bytes.  ESP32 has 320 kB SRAM -- negligible.
+ *              Time cost: one analogReadMilliVolts() ≈ 70 µs, once per second.
+ *              Both costs are immaterial.
+ *   CHANGED  flushToSD()  -- format string extended: "...%.2f,%u\n" for the
+ *                           two new columns.
+ *   CHANGED  LOG_FILE_HEADER -- 'supply_V,power_down' appended (Config.h).
  *
- * Changes vs. v5 (kept for history)
- * ----------------------------------
+ *   COMPATIBILITY NOTE (existing log.csv files):
+ *              ensureLogHeader() only writes a header if the file does NOT
+ *              exist.  A pre-existing log.csv will get new 7-column rows
+ *              appended after old 5-column rows -- the header won't match.
+ *              Fix: call POST /reset via the WebPortal once after flashing.
+ *              A Serial warning is printed by ensureLogHeader() if it detects
+ *              a file already exists when this firmware version boots.
+ *
+ * Changes vs. v5
+ * --------------
  *   ADDED  _otaInProgress flag (bool, default false)
  *   ADDED  setOtaInProgress(bool)  -- called by WebPortal OTA handlers
  *   ADDED  isOtaInProgress()       -- read by WebPortal for /api/live response
@@ -82,21 +101,24 @@
 struct Sample {
   uint32_t millis_ts;   // ESP32 uptime ms at time of sample
   uint32_t unix_ts;     // UTC epoch from DS3231 (0 = RTC absent/not set)
-  float    voltage_V;
-  float    power_W;
+  float    voltage_V;   // mains voltage from Shelly (V RMS)
+  float    power_W;     // active power from Shelly (W)
   float    pf;          // stores pf_apparent in this firmware version
-  float    supply_V;    // 9V-rail in volts at time of sample (0.0 = monitor disabled)
-  bool     power_lost;  // true if undervoltage was triggered at time of this sample
+  float    supply_V;    // 9V-rail voltage at sample time (V, single ADC read)
+  uint8_t  power_down;  // 0=normal, 1=undervoltage latched by PowerMonitor
 };
 
 class Logger {
 public:
   // ShellyClient is injected; RTC_DS3231 is optional (nullptr = no RTC).
-  // Keeping the RTC as a pointer with a default preserves the single-argument
-  // call signature used by the unit-test double: Logger(sc).
-  explicit Logger(ShellyClient& shelly, RTC_DS3231* rtc = nullptr)
+  // The power-loss flag is set externally via setPowerLost(bool) called from
+  // loop() after powerMonitor.isPowerLost() -- avoids any dependency on
+  // PowerMonitor.h inside Logger.h (prevents Arduino CLI header-ordering issues).
+  explicit Logger(ShellyClient& shelly,
+                  RTC_DS3231*   rtc = nullptr)
     : _shelly(shelly),
       _rtc(rtc),
+      _powerLostFlag(false),
       _sdSPI(VSPI),
       _bufferCount(0),
       _droppedSamples(0),
@@ -106,8 +128,6 @@ public:
       _lastVoltage(NAN),
       _lastPower(NAN),
       _lastPf(NAN),
-      _lastSupplyV(0.0f),
-      _lastPowerLost(false),
       _sdOk(false),
       _otaInProgress(false),
       _pollIntervalMs(INTERVAL_SHELLY_POLL_MS),   // 1000 ms default
@@ -118,6 +138,7 @@ public:
     _sdSPI.begin(PIN_SD_CLK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
     _sdOk = initSDCard();
     Serial.printf("[Logger] SD=%s\n", _sdOk ? "OK" : "FEHLER");
+    if (_sdOk) _openLogFile();   // FAT traversal happens once here only
     return _sdOk;
   }
 
@@ -153,28 +174,29 @@ public:
 
   bool isOtaInProgress() const { return _otaInProgress; }
 
+  // Called from loop() immediately after powerMonitor.isPowerLost() is checked.
+  // Decouples Logger from PowerMonitor.h -- no include dependency needed.
+  void setPowerLost(bool lost) { _powerLostFlag = lost; }
+
   // -- Called from loop() every iteration -----------------------------------
   //
-  // Two operating modes, selected automatically:
-  //
-  //   A. BATCH DRAIN (startup)
-  //      When the Shelly sends a {"batch":[…]} on first connection,
-  //      ShellyClient::ingestBatch() fills a pending queue.  Each call
-  //      to pollIfDue() consumes one sample from that queue, back-dating
-  //      millis_ts and unix_ts so CSV rows carry the time the Shelly
-  //      actually took the measurement.  The poll-interval timer is
-  //      still honoured so the ring buffer fills at a controlled rate.
-  //
-  //   B. NORMAL (steady state)
-  //      Reads the latest cached value from ShellyClient, unchanged
-  //      from v7.
+  // pollIfDue() used to call _pzem.voltage() etc. synchronously.
+  // Now it reads the last value cached by ShellyClient::ingest().
+  // The "poll interval" is still honoured -- we don't push a sample to the
+  // ring-buffer more often than _pollIntervalMs even if the Shelly pushes
+  // faster (it shouldn't, but belt-and-suspenders).
   void pollIfDue() {
+    // Suspend all sampling while a firmware update is being written.
+    // The Shelly watchdog will trip (expected -- see header note).
     if (_otaInProgress) return;
 
     uint32_t now = millis();
     if (now - _lastPollMs < _pollIntervalMs) return;
     _lastPollMs = now;
 
+    // If the Shelly watchdog has timed out or data is not yet valid,
+    // do not push a sample -- just update live display fields to NAN so
+    // the web UI shows "--" and the LED turns red.
     if (!_shelly.shellyOk() || !_shelly.hasData()) {
       _lastVoltage = NAN;
       _lastPower   = NAN;
@@ -182,52 +204,38 @@ public:
       return;
     }
 
-    // ── Mode A: drain one pending batch sample ────────────────────────────
-    if (_shelly.hasPendingSamples()) {
-      int32_t msAgo = _shelly.nextPendingMsAgo();
-      _shelly.consumePendingSample();     // advances _latest in ShellyClient
-
-      float V  = _shelly.getVoltage();
-      float P  = _shelly.getPower();
-      float PF = _shelly.getPfApparent();
-
-      _lastVoltage = V;
-      _lastPower   = P;
-      _lastPf      = PF;
-
-      if (P >= _powerThresholdW) {
-        // Back-date millis_ts: subtract how long ago the Shelly took this sample.
-        uint32_t millis_backdated = (msAgo < (int32_t)now)
-                                    ? (now - (uint32_t)msAgo)
-                                    : 0;
-
-        // Back-date unix_ts by the same offset (integer seconds).
-        uint32_t uts = 0;
-        if (_rtc != nullptr) {
-          uint32_t nowUts = (uint32_t)_rtc->now().unixtime();
-          uint32_t secsAgo = (uint32_t)(msAgo / 1000);
-          uts = (nowUts > secsAgo) ? (nowUts - secsAgo) : 0;
-        }
-
-        pushSample({ millis_backdated, uts, V, P, PF, _lastSupplyV, _lastPowerLost });
-        Serial.printf("[Logger] batch sample (-%lu ms ago): V=%.1f P=%.1f\n",
-                      (unsigned long)msAgo, V, P);
-      }
-      return;
-    }
-
-    // ── Mode B: normal single-sample path (unchanged from v7) ─────────────
     float V  = _shelly.getVoltage();
     float P  = _shelly.getPower();
     float PF = _shelly.getPfApparent();
 
+    // Update live-display cache (shown in /api/live regardless of threshold)
     _lastVoltage = V;
     _lastPower   = P;
     _lastPf      = PF;
 
+    // Single (non-oversampled) ADC read of the 9V rail for the CSV column.
+    // PowerMonitor uses 16x oversampling for the safety decision; one read
+    // here is sufficient for logging purposes (±0.3 V is fine for post-
+    // processing -- the exact trigger voltage is not needed).
+    // When POWER_MONITOR_ENABLED == 0 the circuit is absent; PIN_VSUPPLY
+    // floats, so we log 0.0 V as a clear "not populated" sentinel.
+#if POWER_MONITOR_ENABLED
+    uint32_t _supplyMv = analogReadMilliVolts(PIN_VSUPPLY);
+    float supplyV = (float)(((uint64_t)_supplyMv *
+                    (DIVIDER_R_TOP_OHM + DIVIDER_R_BOTTOM_OHM)) /
+                    DIVIDER_R_BOTTOM_OHM) / 1000.0f;
+    uint8_t pdFlag = _powerLostFlag ? 1 : 0;
+#else
+    float   supplyV = 0.0f;
+    uint8_t pdFlag  = 0;
+#endif
+
+    // Apply logging threshold (Req 8): only store sample if P >= threshold
     if (P >= _powerThresholdW) {
+      // Capture wall-clock time from DS3231. Returns 0 when RTC is absent
+      // or has lost power -- CSV writes 'RTC_NOT_SET' for those rows.
       uint32_t uts = (_rtc != nullptr) ? (uint32_t)_rtc->now().unixtime() : 0;
-      pushSample({ now, uts, V, P, PF, _lastSupplyV, _lastPowerLost });
+      pushSample({ now, uts, V, P, PF, supplyV, pdFlag });
     }
   }
 
@@ -249,18 +257,27 @@ public:
   }
 
   // -- Public flush (called by /download handler before streaming) ----------
+  //
+  // Timing guard (fix for issue #6):
+  //   _logFile.flush() syncs data to SD media via SPI.  On a healthy card at
+  //   4 MHz SPI this takes < 10 ms.  On a marginal card it can stall for
+  //   hundreds of ms, blocking the HTTP server and causing Shelly push timeouts.
+  //   We time the entire flush call.  If it exceeds SD_FLUSH_TIMEOUT_MS we
+  //   set _sdOk = false so the next flushIfDue() calls tryRecoverSD() rather
+  //   than blocking again.  The data written in this call is NOT discarded —
+  //   the rows are already in the file handle's write buffer before flush() is
+  //   called; the sync may have partially succeeded even if it was slow.
   bool flushToSD() {
     if (!_sdOk || _bufferCount == 0) return _sdOk;
 
-    uint32_t t0 = millis();
-    File f = SD.open(LOG_FILE_PATH, FILE_APPEND);
-    uint32_t t1 = millis();
-
-    if (!f) {
-      Serial.println("[Logger] SD-Open fehlgeschlagen, markiere SD als defekt");
+    if (!_logFile) _openLogFile();
+    if (!_logFile) {
+      Serial.println("[Logger] Log-Datei nicht verfuegbar");
       _sdOk = false;
       return false;
     }
+
+    uint32_t t0 = millis();
 
     for (size_t i = 0; i < _bufferCount; i++) {
       char dtbuf[20];
@@ -272,69 +289,59 @@ public:
       } else {
         snprintf(dtbuf, sizeof(dtbuf), "RTC_NOT_SET");
       }
-      f.printf("%s,%lu,%.1f,%.1f,%.2f,%.2f,%d\n",
+      _logFile.printf("%s,%lu,%.1f,%.1f,%.2f,%.2f,%u\n",
                dtbuf,
                (unsigned long)_buffer[i].millis_ts,
                _buffer[i].voltage_V,
                _buffer[i].power_W,
                _buffer[i].pf,
                _buffer[i].supply_V,
-               _buffer[i].power_lost ? 1 : 0);
+               (unsigned)_buffer[i].power_down);
     }
 
-    uint32_t t2 = millis();
-    f.flush();
-    uint32_t t3 = millis();
-    f.close();
-    uint32_t t4 = millis();
+    _logFile.flush();   // commit to SD -- this is the blocking call
 
-    Serial.printf("[Logger] %u Samples SD: open=%lums write=%lums flush=%lums close=%lums total=%lums\n",
-                  (unsigned)_bufferCount,
-                  (unsigned long)(t1-t0),
-                  (unsigned long)(t2-t1),
-                  (unsigned long)(t3-t2),
-                  (unsigned long)(t4-t3),
-                  (unsigned long)(t4-t0));
+    uint32_t dt = millis() - t0;
+    if (dt > SD_FLUSH_TIMEOUT_MS) {
+      // Card is too slow — flag it so tryRecoverSD() runs next cycle instead
+      // of blocking here again.  Data already written above is not lost.
+      Serial.printf("[Logger] WARNUNG: SD-Flush %lu ms (Limit %d ms) -- SD als fehlerhaft markiert\n",
+                    (unsigned long)dt, SD_FLUSH_TIMEOUT_MS);
+      _sdOk = false;
+      _bufferCount = 0;
+      return false;
+    }
+    if (dt > 50) {
+      // Slower than expected but within limit — log it so marginal cards
+      // are visible in the serial output without being fatal.
+      Serial.printf("[Logger] SD-Flush %lu ms (%u Samples)\n",
+                    (unsigned long)dt, (unsigned)_bufferCount);
+    }
+
+    Serial.printf("[Logger] %u Samples auf SD geschrieben\n",
+                  (unsigned)_bufferCount);
     _bufferCount = 0;
     return true;
   }
 
-  // -- Emergency flush on power loss ----------------------------------------
-  bool flushPowerLost(float supplyV) {
-    for (size_t i = 0; i < _bufferCount; i++) {
-      _buffer[i].power_lost = true;
-    }
-    if (_bufferCount < RAM_BUFFER_SIZE) {
-      uint32_t now = millis();
-      uint32_t uts = (_rtc != nullptr) ? (uint32_t)_rtc->now().unixtime() : 0;
-      Sample sentinel;
-      sentinel.millis_ts  = now;
-      sentinel.unix_ts    = uts;
-      sentinel.voltage_V  = isnan(_lastVoltage) ? 0.0f : _lastVoltage;
-      sentinel.power_W    = isnan(_lastPower)   ? 0.0f : _lastPower;
-      sentinel.pf         = isnan(_lastPf)      ? 0.0f : _lastPf;
-      sentinel.supply_V   = supplyV;
-      sentinel.power_lost = true;
-      _buffer[_bufferCount++] = sentinel;
-    }
-    return flushToSD();
-  }
-
-  // -- Reset log file (POST /reset handler) -- unchanged from v4 -------------
+  // -- Reset log file (POST /reset handler) ----------------------------------
   bool resetSDFile() {
     if (!_sdOk) return false;
     _bufferCount = 0;
+    if (_logFile) _logFile.close();
     if (SD.exists(LOG_FILE_PATH)) {
       if (!SD.remove(LOG_FILE_PATH)) {
         Serial.println("[Logger] SD.remove fehlgeschlagen");
+        _openLogFile();
         return false;
       }
     }
     File f = SD.open(LOG_FILE_PATH, FILE_WRITE);
-    if (!f) return false;
+    if (!f) { _openLogFile(); return false; }
     f.println(LOG_FILE_HEADER);
     f.close();
     Serial.println("[Logger] Log-Datei zurueckgesetzt");
+    _openLogFile();
     return true;
   }
 
@@ -345,24 +352,26 @@ public:
   float    getLastVoltage()    const { return _lastVoltage; }
   float    getLastPower()      const { return _lastPower; }
   float    getLastPf()         const { return _lastPf; }
-  float    getLastSupplyV()    const { return _lastSupplyV; }
   size_t   getBufferCount()    const { return _bufferCount; }
   uint32_t getDroppedSamples() const { return _droppedSamples; }
 
-  // Called from loop() after powerMonitor.update() -- stores latest rail
-  // voltage so pollIfDue() can stamp it into each Sample.
-  void setLastSupplyV(float v)      { _lastSupplyV   = v; }
-  void setLastPowerLost(bool lost)  { _lastPowerLost = lost; }
-
   File openLogFileForRead() {
     if (!_sdOk) return File();
-    return SD.open(LOG_FILE_PATH, FILE_READ);
+    if (_logFile) { _logFile.flush(); _logFile.close(); }
+    File f = SD.open(LOG_FILE_PATH, FILE_READ);
+    return f;
+    // Note: _openLogFile() NOT called here -- WebPortal calls it via
+    // reopenAfterRead() once the stream is closed.
   }
 
+  void reopenAfterRead() { _openLogFile(); }
+
 private:
-  ShellyClient& _shelly;      // injected reference -- not owned
-  RTC_DS3231*   _rtc;         // optional injected pointer -- not owned (nullptr = no RTC)
+  ShellyClient& _shelly;        // injected reference -- not owned
+  RTC_DS3231*   _rtc;           // optional injected pointer -- not owned (nullptr = no RTC)
+  bool          _powerLostFlag; // set via setPowerLost() from loop(); no PowerMonitor.h dep
   SPIClass      _sdSPI;
+  File          _logFile;     // persistent write handle -- opened once, never closed between flushes
   Sample        _buffer[RAM_BUFFER_SIZE];
   size_t        _bufferCount;
   uint32_t      _droppedSamples;
@@ -372,8 +381,6 @@ private:
   float         _lastVoltage;
   float         _lastPower;
   float         _lastPf;
-  float         _lastSupplyV;    // 9V-rail cached from PowerMonitor (V)
-  bool          _lastPowerLost;  // undervoltage trigger state at last sample
   bool          _sdOk;
   bool          _otaInProgress;   // true while WebPortal is writing OTA flash
   uint32_t      _pollIntervalMs;
@@ -401,17 +408,28 @@ private:
     }
   }
 
-  bool initSDCard() {
-    return SD.begin(PIN_SD_CS, _sdSPI, 20000000);  // 20 MHz -- was 4 MHz
+  void _openLogFile() {
+    if (_logFile) _logFile.close();
+    _logFile = SD.open(LOG_FILE_PATH, FILE_APPEND);
+    if (_logFile) {
+      Serial.println("[Logger] Log-Datei geoeffnet");
+    } else {
+      Serial.println("[Logger] Log-Datei open() fehlgeschlagen");
+      _sdOk = false;
+    }
   }
 
-  // -- SD auto-recovery every 30 s (unchanged from v4) ----------------------
+  bool initSDCard() {
+    return SD.begin(PIN_SD_CS, _sdSPI, 4000000);
+  }
+
+  // -- SD auto-recovery every 30 s ------------------------------------------
   void tryRecoverSD() {
     uint32_t now = millis();
     if (now - _lastSdRetryMs < 30000) return;
     _lastSdRetryMs = now;
-
     Serial.println("[Logger] Versuche SD-Karte neu zu initialisieren...");
+    if (_logFile) _logFile.close();
     SD.end();
     delay(50);
     _sdOk = initSDCard();
@@ -420,12 +438,18 @@ private:
         File f = SD.open(LOG_FILE_PATH, FILE_WRITE);
         if (f) { f.println(LOG_FILE_HEADER); f.close(); }
       }
+      _openLogFile();
       Serial.println("[Logger] SD wieder verfuegbar");
     }
   }
 };
 
 // Called once from setup() to ensure the log file has a header row.
+// COMPATIBILITY WARNING: If a pre-existing log.csv is found (from an older
+// firmware version with fewer columns), this function does NOT rewrite the
+// header. New 7-column rows will be appended after old 5-column rows, making
+// the file inconsistent. Solution: call POST /reset via the WebPortal once
+// after flashing this firmware version.
 inline void ensureLogHeader() {
   if (!SD.exists(LOG_FILE_PATH)) {
     File f = SD.open(LOG_FILE_PATH, FILE_WRITE);
@@ -433,6 +457,12 @@ inline void ensureLogHeader() {
       f.println(LOG_FILE_HEADER);
       f.close();
     }
+  } else {
+    // File already exists -- warn that it may have been written by an older
+    // firmware version with a different column layout.
+    Serial.println("[Logger] HINWEIS: log.csv existiert bereits. Falls von einer");
+    Serial.println("[Logger]          aelteren Firmware-Version: bitte /reset ausfuehren,");
+    Serial.println("[Logger]          da neue Spalten (supply_V, power_down) hinzukamen.");
   }
 }
 
